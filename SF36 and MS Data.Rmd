@@ -1,0 +1,972 @@
+---
+title: "OUCRU_data"
+author: "01NVb-Thaontp"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, echo=FALSE}
+rm(list = ls(all.names = TRUE))
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, 
+                      fig.cap = " ", size = "tiny")
+```
+
+```{r}
+
+library(readxl)
+library(readr)
+library(tidyverse)
+library(gtsummary)
+library(table1)
+library(writexl)
+library(labelled)
+library(rio)
+library(psych)
+library(kableExtra)
+library(lattice)
+library(plotly)
+library(gsubfn)
+library(gt)
+library(car)
+library(lme4)
+library(sjPlot)
+library(Amelia)
+library(ggpubr)
+library(ROCR)
+library(pROC)
+library(rcompanion)
+library(pacman)
+library(nlme)
+library(Hmisc)
+library(ggeffects)
+library(data.table)
+fulldata <- import_list("C:/Thaontp/Thao/Muscle/DataFeb2023.xlsx")
+
+list2env(fulldata, .GlobalEnv)
+
+##Tetanus
+
+tetanus <- TETANUS
+
+cns <- CNS
+
+demograph <- ADM %>% 
+	filter(USUBJID %in% c(tetanus$USUBJID, cns$USUBJID))
+
+dischargedate <- DIS %>% select(USUBJID, OUTCOME, ICUDISDTC, DAYSOFICU)
+
+demograph <- left_join(demograph, dischargedate, by = "USUBJID") %>%
+	relocate(ICUDTC, .before = ICUDISDTC) %>% 
+	filter(USUBJID %in% MUSCLE_MuscleUls$USUBJID) %>%
+	mutate(Stayicu = as.numeric(ICUDISDTC - ICUDTC + 1)) %>% 
+	mutate_at(c("ICUDTC", "ICUDISDTC"), ~as.Date(.))
+
+demograph <- demograph %>% select(USUBJID, OUTCOME, Stayicu, HYPERTENSION:ELECTIVESURGERY,IMMUNOCOMPROMISED)
+
+admission <- ADM %>% select(USUBJID, ADMDTC)
+
+##missing AGE in SCR
+
+SCR1 <- left_join(SCR, admission, by = "USUBJID") %>% 
+	mutate(ADMDTC = as.numeric(format(ADMDTC, "%Y"))) %>% 
+	mutate(AGE = ifelse(is.na(AGE) == TRUE, as.numeric(ADMDTC - YEAROFBIRTH), AGE))
+
+add_demo <- select(SCR1, USUBJID, AGE, SEX) %>% 
+	filter(USUBJID %in% c(tetanus$USUBJID, cns$USUBJID))
+
+demograph <- left_join(demograph, add_demo,  by = "USUBJID") %>%
+	mutate(SEX = ifelse(SEX == "F", "Female", "Male"))
+
+##Filter patients in MUSCLE RF-CSA
+
+##Select muscle data have at least 1 measure
+
+demograph <- demograph %>% mutate(group = case_when(USUBJID %in% tetanus$USUBJID ~ "Tetanus",
+																										USUBJID %in% cns$USUBJID ~ "CNS"))
+
+#Pick date of admission to get full AGE
+
+stringreplace <- function(x){
+	if_else(x == "Y", 1L, 0L, as.integer(NA))
+}
+
+demograph <- demograph %>%
+  mutate(across(c(HYPERTENSION:IMMUNOCOMPROMISED), na_if, "UNKNOWN"))
+
+demograph <- demograph %>% 
+	mutate(across(c(HYPERTENSION:IMMUNOCOMPROMISED), stringreplace))
+
+demograph <- demograph %>% 
+	filter(!USUBJID %in% c("003-212")) ##Exclude Food poisoning patient
+
+#demograph <- demograph[demograph$USUBJID %in% quolchange$USUBJID,]
+
+```
+Muscle admission size bias by AGE, WEIGHT and SEX with significant p-value
+
+```{r muscle standardize with physical values}
+
+muscle <- MUSCLE_MuscleUls %>% 
+	filter(if_any(c(N1, N2, N3), ~ !is.na(.))) %>% 
+	filter(USUBJID %in% demograph$USUBJID)
+
+##for those are missing
+
+muscle <- muscle %>% 
+	rowwise() %>% 
+	mutate(AVERAGE = round(mean(c(N1, N2, N3), na.rm = TRUE), 2)) %>% 
+	filter(AVERAGE != 0)
+
+##Admission muscle
+
+muscleadmission <- muscle %>% 
+	select(USUBJID, MUSCLE_SEQ, MUSCLE_MuscleUls_SEQ, AVERAGE, XSECTIONAREA) %>%
+	filter(MUSCLE_SEQ == 1) %>% 
+	left_join(ADM, by = "USUBJID") %>% 
+	left_join(demograph, by = "USUBJID") %>% 
+	select(USUBJID, AGE, XSECTIONAREA, AVERAGE, WEIGHT, HEIGHT, SEX, group) %>% 
+	mutate(BMI = round(WEIGHT/(HEIGHT/100)^2, 2))
+
+##Test the normality of Muscle
+
+#qqPlot(muscleadmission$AVERAGE)
+
+#missmap(muscleadmission, main = "Missing observed")
+
+##Every patient will have 2 value of muscle at admission (Right and left leg)
+
+geomadmission <- muscleadmission %>% 
+	group_by(USUBJID) %>% 
+	mutate(ad_muscle = round(geometric.mean(c(AVERAGE[XSECTIONAREA == "RLeg"], AVERAGE[XSECTIONAREA == "LLeg"])), 3)) %>% 
+	select(-XSECTIONAREA) %>% 
+	unique()
+
+#pairs(data = geomadmission,
+#    ~ ad_muscle + WEIGHT + HEIGHT + AGE + BMI)
+
+
+muscle_age <- glm(formula = ad_muscle ~ AGE + WEIGHT + SEX, data = geomadmission)
+
+muscle_age1 <- glm(formula = AVERAGE ~ AGE + WEIGHT + SEX, data = geomadmission)
+
+#corr.test(geomadmission[,-c(1)],
+#          use    = "pairwise",
+#          method = "pearson",
+#          adjust = "none")
+
+#summary(muscle_age)
+
+tab_model(muscle_age)
+
+tab_model(muscle_age1)
+##plot random effect of all considered parameters
+#plot_model(muscle_con, type = "diag")
+
+#plot_model(muscle_age, type = "diag")
+
+compareGLM(muscle_age, muscle_age1)
+
+##To exclude the multicollinearity from the later model, we should choose the less coorelation independent variables to be predictors, which will escape the influence amongst them.
+
+##when VIF or tolerance is equal to 1, the ith independent variable is not correlated to the remaining ones, meaning that multicollinearity does not exist. VIF between 1 and 5 = variables are moderately correlated. VIF greater than 5 = variables are highly correlated
+
+```
+####Edited version
+
+After consideration, I choose Geometric mean which is appropriated for situation involving change of subjects are not independent of each other. Geometric mean = nth root of product of n subject, example 3 subjects have geometric mean equal cube root of a*b*c | Explain: n is number of subjects, a, b, c... are values of each subject
+
+As we can see in comparison 2 models, the first one based on Geometric mean shows lowe AIC and BIC which indicates it is better than the second one.
+```{r muscle analyse}
+
+change_muscle <- muscle %>% 
+	select(USUBJID, MUSCLE_SEQ, XSECTIONAREA, AVERAGE) %>% 
+	pivot_wider(names_from = XSECTIONAREA, values_from = AVERAGE)
+
+change_muscle <- change_muscle %>% 
+	arrange(USUBJID, MUSCLE_SEQ) %>% 
+	group_by(USUBJID)
+
+##For missing data of one of 2 legs, find the linear regression between 2 legs then use the equation to predict the missed one
+
+ggplot(change_muscle, aes(RLeg, LLeg)) +
+  geom_point() +
+  stat_smooth(method = lm)
+
+legs <- lm(RLeg ~ LLeg, data = change_muscle)
+
+summary(legs)
+
+```
+The equation for linear relationship between Right leg and left leg
+
+RLeg = 0.32062 + 0.98421*LLeg
+
+LLeg = (RLeg - 0.32062)/0.98421
+
+We use this equation to predict missed value
+
+```{r}
+##Add-in missing rows
+
+change_muscle <- change_muscle %>% 
+	ungroup() %>% 
+	rowwise() %>% 
+	mutate(RLeg = replace_na(RLeg, round(as.numeric(0.32062 + 0.98421*LLeg), 2)),
+				 LLeg = replace_na(LLeg, round(as.numeric((RLeg - 0.32062)/0.98421), 2)))
+
+##Each leg muscle size is converted to ratio of the last muscle measurement to the first, so if 0 < rate < 1 the muscle area has decrease, if rate > 1 the muscle has increase, if rate = 1 the muscle is the same. Calculate geometric mean between rateRleg and rateLleg before create the model.
+
+```
+
+Muscle change are no longer belong to AGE, SEX and WEIGHT. The model show that: in admission the size of muscle are distributed in the context of other's effect, but the muscle loss don't dependent on physical factors, so we should turn to clinical factors or efficacy of treatment. 
+
+```{r, Method 1}
+
+change_muscle3 <- change_muscle %>% filter(MUSCLE_SEQ == max(MUSCLE_SEQ) | MUSCLE_SEQ == min(MUSCLE_SEQ))
+
+change_muscle3 <- change_muscle3 %>% 
+	group_by(USUBJID) %>% 
+	mutate(rateRleg = round(RLeg[which.max(MUSCLE_SEQ)]/RLeg[which.min(MUSCLE_SEQ)], 3),
+				 rateLleg = round(LLeg[which.max(MUSCLE_SEQ)]/LLeg[which.min(MUSCLE_SEQ)], 3)) %>% 
+	select(USUBJID, rateRleg, rateLleg) %>%
+	unique() %>% 
+	mutate(geomean = round(geometric.mean(c(rateRleg, rateLleg)), 3))
+
+change_muscle3 <- left_join(change_muscle3, geomadmission, by = "USUBJID") %>% 
+	select(-c(rateRleg, rateLleg, AVERAGE)) %>% 
+	unique() %>% 
+	filter(!is.na(AGE))
+
+testchange <- glm(geomean ~ WEIGHT + SEX + AGE, data = change_muscle3)
+
+tab_model(testchange)
+
+```
+
+Model of trending in muscle loss with Subject ID is a random effect (because we want to see the change between time points, the Individual and their intrinsic physiology are assumed to be just random factor).
+```{r}
+
+##Pick up the Dead outcome after discharge from SF36
+deadafter <- SF36 %>% select(USUBJID, Note)
+
+timeonset_te <- tetanus %>% select(USUBJID, FIRSTSYMTOHOSPPERIOD)
+
+timeonset_cns <- cns %>% 
+	select(USUBJID, DAYSOFSYMPTOM) %>% 
+	rename(FIRSTSYMTOHOSPPERIOD = DAYSOFSYMPTOM)
+
+##Combine all data from Tetanus and CNS
+
+timeonset <- rbind(timeonset_te, timeonset_cns) %>% 
+	filter(USUBJID %in% demograph$USUBJID) %>% 
+	left_join(deadafter, by = "USUBJID") %>%
+	left_join(demograph, by = "USUBJID") %>%
+	select(USUBJID, FIRSTSYMTOHOSPPERIOD, Stayicu, Note) %>% 
+	left_join(DIS, by = "USUBJID") %>% 
+	select(USUBJID, Stayicu, FIRSTSYMTOHOSPPERIOD, OUTCOME, Note, DAYSOFMECHVENT) %>%
+	group_by(USUBJID) %>% 
+	group_modify(~.x %>% mutate(Note = ifelse(str_detect(Note, "Discharge for end of life care|Dead") == TRUE, "Death", NA))) %>% 
+	unique() %>% 
+	mutate(newoutcome = if_else(if_any(c("OUTCOME", "Note"), ~. %in% c("TransferToDie", "Death")) == TRUE, "Death", "Alive")) %>% ##New outcome during follow up
+	filter(row_number() == n()) %>% 
+	filter(USUBJID %in% demograph$USUBJID) %>% 
+	left_join(change_muscle3, by = "USUBJID")
+
+#admission_muscle <- select(muscleadmission, USUBJID, AVERAGE)
+
+timeonset <- timeonset %>%
+	#select(-changeLleg) %>% 
+	#rename(changesum = changeRleg) %>% 
+	mutate(newoutcome = factor(newoutcome, level = c("Alive", "Death")),
+				 SEX = factor(SEX, level = c("Male", "Female")))
+
+timeonset <- timeonset %>% replace_na(list(
+	FIRSTSYMTOHOSPPERIOD = round(mean(timeonset$FIRSTSYMTOHOSPPERIOD, na.rm = TRUE), 0), 
+	geomean = round(mean(timeonset$geomean, na.rm = TRUE), 0)))
+
+##Join newoutcome to demograph
+
+newoutcome <- timeonset %>% select(USUBJID, newoutcome)
+library(ggeffects)
+
+```
+
+```{r, eval = FALSE}
+##Sequence
+
+model1 <- lmer(AVERAGE ~ MUSCLE_SEQ + (MUSCLE_SEQ|USUBJID), data = muscle)
+
+ggpredict(model1, terms = c('MUSCLE_SEQ')) %>% plot()
+
+model_outcome <- left_join(muscle, newoutcome, by = "USUBJID")
+
+model_outcome$newoutcome <- factor(model_outcome$newoutcome, levels = c("Alive", "Death"))
+
+model2 = lme(AVERAGE ~ MUSCLE_SEQ + newoutcome, random = ~1|USUBJID,
+            data=model_outcome,
+            method="REML")
+
+
+ggpredict(model2, terms = c("MUSCLE_SEQ", "newoutcome")) %>% plot()
+
+#model.fixed = gls(AVERAGE ~ MUSCLE_SEQ,
+#                  data=muscle,
+#                  method="REML")
+
+#ggeffects::ggeffect(model.fixed, terms = c('MUSCLE_SEQ')) %>% 
+#  plot()
+
+
+#predict1 <- ggeffects::ggpredict(model1)
+
+#plot(predict1)
+
+#beta <- coef(model1)$USUBJID
+
+#beta1 <- beta$`(Intercept)`
+#beta2 <- beta$MUSCLE_SEQ
+
+#df <- as.data.frame(beta)
+#df <- rownames_to_column(df, "USUBJID")
+
+#timeonset <- left_join(timeonset, df, by = "USUBJID")
+
+#timeonset <- timeonset %>% rename(Beta1 = `(Intercept)`,
+#																	Beta2 = MUSCLE_SEQ)
+
+#fit <- glm(newoutcome ~ Beta1 + Beta2, data = timeonset, family = binomial)
+
+
+```
+
+
+```{r, Method 2}
+
+geomalltime <- change_muscle %>% 
+	group_by(USUBJID, MUSCLE_SEQ) %>% 
+	mutate(muscle = round(geometric.mean(c(RLeg, LLeg)), 3)) %>%
+	select(MUSCLE_SEQ, USUBJID, muscle) %>% 
+	unique()
+
+model3 <- lmer(muscle ~ MUSCLE_SEQ + (MUSCLE_SEQ|USUBJID), data = geomalltime)
+
+ggpredict(model3, terms = c('MUSCLE_SEQ')) %>% plot()
+
+###
+
+geomalltime <- left_join(geomalltime, newoutcome, by = "USUBJID")
+
+geomalltime$newoutcome <- factor(geomalltime$newoutcome, levels = c("Alive", "Death"))
+
+model4 = lme(muscle ~ MUSCLE_SEQ + newoutcome, random = ~1|USUBJID,
+            data=geomalltime,
+            method="REML")
+
+
+ggpredict(model4, terms = c("MUSCLE_SEQ", "newoutcome")) %>% plot()
+
+	#select(-XSECTIONAREA) %>% 
+	#unique()
+
+#tab_model(testchange)
+
+#tab_model(testchange1)
+
+#plot_model(testchange, type = "diag")
+
+
+##Choose the model with BIC closer to zero
+
+##The muscle loss is calculated by difference between last measurement and first measurement (for those having time point 3 and 4). For those missing the time point 3 and don't have time 4, we will count difference of time 2 and 1. This mean we take into account of any muscle loss during hospitalization.
+
+```
+
+```{r muscle sequence}
+
+geomalltime <- geomalltime %>% 
+	mutate(MUSCLE_SEQ = factor(MUSCLE_SEQ))
+
+##Exclude MUSCLE_SEQ = 4 because there are only 2 patients measured, and the muscle values are same as MUSCLE_SEQ = 3
+
+##Muscle loss in unit day From SEQ 1 (admission) to SEQ 2 (2->7 days after admission, so we choose mean of days = 4.5 from admission)
+
+
+tablemuscle <- ungroup(geomalltime) %>%
+	select(-newoutcome) %>% 
+	filter(MUSCLE_SEQ != 4) %>% 
+	pivot_wider(names_from = MUSCLE_SEQ, values_from = muscle) %>% 
+	left_join(icustay, by = "USUBJID") %>% 
+	select(USUBJID, AGE, SEX, Stayicu, OUTCOME, newoutcome, `1`:`3`)
+
+tablemuscle_stage <- tablemuscle %>% 
+	rowwise() %>% 
+	mutate(stage1 = as.numeric(`2` - `1`),
+				 stage2 = as.numeric(`3` - `2`))
+```
+
+```{r relation to onset period}
+
+demograph <- left_join(demograph, newoutcome, by = "USUBJID")
+
+demo <- demograph %>% 
+	select(-c(USUBJID, OUTCOME, ANGINA, CONGESTIVEGRADE13, ANAEMIA, CONGESTIVEGRADE4, HEMIPLEGIA, PERIPHERAL, DEMENTIA, SEVERE, ANYMALIGNANCY)) %>%
+	tbl_summary(by = newoutcome, label = c(AGE ~ "Age - years, Median(IQR)",
+												SEX ~ "Sex, n(%)",
+												Stayicu ~ "ICU length of stay, Median (IQR)",
+												HYPERTENSION ~ "Hypertension, n(%)",
+												MYOCARDIAL ~ "Myocardiac disease, n(%)",
+												CEREBROVASCULAR ~ "Cerebrovascular disease, n(%)",
+												CHRONIC ~ "Chronic pulmonary disease, n(%)",
+												CONNECTIVE ~ "Connective tissue disease, n(%)",
+												PEPTICULCER ~ "Peptic ulcer disease, n(%)",
+												MILDLIVER ~ "Mild liver disease, n(%)",
+												MODERATELIVER ~ "Moderate/severe liver disease, n(%)",
+												MODERATEKIDNEY ~ "Moderate/severe kidney disease, n(%)",
+												DIABETES ~ "Diabetes, n(%)",
+												DIABETESCHRONIC ~ "Diabetes with chronic complications, n(%)",
+												METASTATIC ~ "Metastatic solid tumour, n(%)",
+												SMOKER ~ "Smoker, n(%)",
+												ELECTIVESURGERY ~ "Elective surgery within 30 days, n(%)",
+												IMMUNOCOMPROMISED ~ "Immunocompromised, n(%)",
+												group ~ "Admission disorder, n(%)"),
+							missing = "no") %>% 
+	as_gt() %>% 
+	gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(groups = everything())
+  )
+
+demo
+
+```
+
+```{r}
+ ## Use arithmetic mean of all sample for missing data 
+
+#xyplot(Stayicu ~ FIRSTSYMTOHOSPPERIOD, group= newoutcome, data=timeonset, auto.key=list(space="right"), jitter.x=TRUE, jitter.y=TRUE)
+
+##Control the effect of mechanical vent and fix the onset time, QUESTION: whether there is an association between time of onset and ICU stay after controlling for the variation in days of mechanical vent
+
+library(Amelia)
+#missmap(timeonset, main = "Missing values vs observed")
+
+##Edit missing data by mean of all sample
+
+##test normality
+#ks.test(timeonset$geomean, "pnorm", mean=mean(timeonset$geomean, na.rm = TRUE), sd=sd(timeonset$geomean, na.rm = TRUE))
+
+##Find which factor can be a predictor for outcome
+
+##Add random effect (confounder) as WEIGHT and BMI
+
+raneff <- ADM %>% 
+	select(USUBJID, WEIGHT, HEIGHT) %>% 
+	unique()%>% 
+	mutate(BMI = round(WEIGHT/(HEIGHT/100)^2, 2)) ##There are some patients don't have admission muscle so when first calculate BMI we didn't include them, this will be calculated again
+
+timeonset <- timeonset %>% left_join(raneff, by = "USUBJID")  %>% select(-Note)
+
+##add the difference of muscle after all (negative results are muscle loss, positive results are muscle gain)
+
+timeonset <- timeonset %>% mutate(musclewaste = as.numeric(geomean - 1))
+
+#model_test <- glmer(newoutcome ~ geomean + DAYSOFMECHVENT + geomean*Stayicu + (1|BMI) + (1|AGE), data = timeonset, family = "binomial")
+
+#tab_model(model_test)
+
+##AUC plot
+
+#predict_test <- predict(model_test, newdata=timeonset, type="response", allow.new.levels = TRUE)
+#prediction_test <- prediction(predict_test, timeonset$newoutcome)
+
+#prf_test <- performance(prediction_test, measure = "tpr", x.measure = "fpr")
+
+#ROCplot <- plot(prf_test, colorize=TRUE, main=paste("ROC for Outcome Prediction AUC:", round(performance(prediction_test, measure = "auc")@y.values[[1]], 3)))
+
+
+##New model
+
+#modela <- glmer(newoutcome ~ DAYSOFMECHVENT + changeharmonic + (1|BMI) + FIRSTSYMTOHOSPPERIOD, data = timeonset, family = "binomial") ## The same result with binomial(link = logit)
+
+#tab_model(modela)
+
+#
+
+#predict_table <- cbind(timeonset, Prob = round(100*predict(modela, type = "response", newdata = timeonset, allow.new.levels = TRUE), 2))
+
+#test <- predict(modela, type = "response", newdata = data.frame(FIRSTSYMTOHOSPPERIOD = 1, DAYSOFMECHVENT = 26, Stayicu = 20, AGE = 65, SEX = "M", changesum = 0.8, WEIGHT = 85, BMI = 15), allow.new.levels = TRUE)
+
+##test the deviance of each variable to the model
+
+#anova(modela, test="Chisq")
+
+##AUC plot
+
+#predict_tb <- predict(modela, newdata=timeonset, type="response", allow.new.levels = TRUE)
+#prediction <- prediction(predict_tb, timeonset$newoutcome)
+
+#prf <- performance(prediction, measure = "tpr", x.measure = "fpr")
+
+#ROCplot <- plot(prf, colorize=TRUE, main=paste("ROC for Outcome Prediction AUC:", round(performance(prediction, measure = "auc")@y.values[[1]], 3)))
+
+##Try some plots to see the probability prediction in particular predictor 
+
+#plot_model(modela, type = "eff", terms = "changesum")
+
+#plot_model(modela, type = "eff", terms = "DAYSOFMECHVENT")
+
+#ROCplot
+
+# + DAYSOFMECHVENT + changeharmonic
+```
+
+
+```{r medicine doses}
+medicineeff <- DIS %>% select(USUBJID, TOTALDOSEMIDAZOLAM, TOTALDOSEDIAZEPAM, TOTALDOSEPIPER)
+
+medicineeff_mod <- left_join(change_muscle3, medicineeff, by = "USUBJID")
+
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+    )
+}
+
+##Discharge
+
+relation_glance <- rcorr(as.matrix(medicineeff_mod[,-c(1,3:8)]))
+
+flattenCorrMatrix(relation_glance$r, relation_glance$P) %>% filter(p <= 0.05)
+
+##Piper on muscle wasting
+
+#lm(formula = geomean ~ TOTALDOSEPIPER, data = medicineeff_mod)
+
+##The coefficient of Piper on muscle change is 1.642e-01, this show very weak effect created by using Pipercuronum to reduce muscle wasting.
+```
+
+geomean: muscle change, the higher geomean than 1, the more increase in muscle, if geomean < 1 this mean muscle size decrease.
+
+ad_muscle: muscle admission (take geometric mean of Right leg and left leg)
+```{r sf36}
+
+##clean enough data for SF36
+library(purrr)
+library(combinat)
+
+sf36 <- SF36 %>% 
+	select(USUBJID, SUBJID, NOTE, QUESTIONAIRESTYPE, HEALTHSTATUS:EXCELLENT) %>% 
+	unique() %>% 
+	filter(NOTE != "test" | is.na(NOTE) == TRUE) %>% ##Exclude test account
+	select(-c(SUBJID, NOTE)) %>% 
+	filter(USUBJID %in% demograph$USUBJID) %>% 
+	filter(if_any(c(HEALTHSTATUS:EXCELLENT), ~!is.na(.))) %>% 
+	group_by(USUBJID) %>% 
+	group_modify(~.x %>% mutate(QUESTIONAIRESTYPE = ifelse(row_number() == 1, "Discharge", "Follow Up"))) %>% ##Rename the false questionaire type
+	ungroup()
+
+##Rearrange column to get the exact order of 36 questions
+sf36 <- reduce(
+  .x = list(c('USUBJID','EXCELLENT'), c('QUESTIONAIRESTYPE', 'USUBJID')), 
+  .f = ~ relocate(.x, .y[1], .after = .y[2]),
+  .init = sf36
+)
+
+##Convert Yes No to 1 and 2, fix the question 32 to 5 levels
+
+sf36 <- sf36 %>% 
+	mutate_at(vars("HINDERSOCIALCOMMU"), ~str_replace(., "6", "5")) %>% 
+	mutate_at(vars("REDUCEAMOUNTTIME", "LESSWORKDONE", "LIMITEDWORKORACTIVITY", "TROUBLEPERFORMINGTASKS", "REDUCETIMEDURATION", "LESSDONEASWANT", "LESSCAREFUL"), ~str_replace_all(., c("Y" = "1", "N" = "2")))
+
+
+##Scoring
+
+scoring <- function(sf36){
+
+gr1 <- function(x){
+  case_when(x == "1" ~ 100,
+            x == "2" ~ 75,
+            x == "3" ~ 50,
+            x == "4" ~ 25,
+            x == "5" ~ 0)
+}
+
+sf36[,c(1,2,20,22,34,36)] <- sapply(sf36[,c(1,2,20,22,34,36)], function(x) gr1(x))
+
+gr2 <- function(x){
+  case_when(x == "1" ~ 0,
+            x == "2" ~ 50,
+            x == "3" ~ 100)
+}
+
+sf36[,c(3,4,5,6,7,8,9,10,11,12)] <- sapply(sf36[,c(3,4,5,6,7,8,9,10,11,12)], function(x) gr2(x))
+
+gr3 <- function(x){
+  case_when(x == "1" ~ 0,
+            x == "2" ~ 100)
+}
+
+sf36[,c(13,14,15,16,17,18,19)] <- sapply(sf36[,c(13,14,15,16,17,18,19)], function(x) gr3(x))
+
+gr4 <- function(x){
+  case_when(x == "1" ~ 100,
+            x == "2" ~ 80,
+            x == "3" ~ 60,
+            x == "4" ~ 40,
+            x == "5" ~ 20,
+            x == "6" ~ 0)
+}
+
+sf36[,c(21,23,26,27,30)] <- sapply(sf36[,c(21,23,26,27,30)], function(x) gr4(x))
+
+gr5 <- function(x){
+  case_when(x == "1" ~ 0,
+            x == "2" ~ 20,
+            x == "3" ~ 40,
+            x == "4" ~ 60,
+            x == "5" ~ 80,
+            x == "6" ~ 100)
+}
+
+sf36[,c(24,25,28,29,31)] <- sapply(sf36[,c(24,25,28,29,31)], function(x) gr5(x))
+
+gr6 <- function(x){
+  case_when(x == "1" ~ 0,
+            x == "2" ~ 25,
+            x == "3" ~ 50,
+            x == "4" ~ 75,
+            x == "5" ~ 100)
+}
+
+sf36[,c(32,33,35)] <- sapply(sf36[,c(32,33,35)], function(x) gr6(x))
+
+##Take the Mean for the NA values
+
+sf36 <- sf36 %>% 
+	mutate(across(c(HEALTHSTATUS:EXCELLENT), ~replace_na(.,round(mean(., na.rm = TRUE), 0))))
+
+sf36 <- sf36 %>% 
+	rowwise() %>% 
+	mutate(pf = mean(c_across(c(3,4,5,6,7,8,9,10,11,12))),
+				 rh = mean(c_across(c(13,14,15,16))),
+				 rp = mean(c_across(c(17, 18, 19))),
+				 ef = mean(c_across(c(23, 27, 29, 31))),
+				 eb = mean(c_across(c(24, 25, 26, 28, 30))),
+				 sf = mean(c_across(c(20, 32))),
+				 pa = mean(c_across(c(21, 22))),
+				 gh = mean(c_across(c(1, 33, 34, 35, 36))))
+}
+
+sf36 <- scoring(sf36)
+
+##ORA
+
+ORA <- sf36 %>% mutate(PF_Z = round((pf - 84.52404)/22.89490, 5),
+                       RP_Z = round((rh - 81.19907)/33.79729, 5),
+                       VT_Z = round((ef - 61.05453)/20.86942, 5),
+                       SF_Z = round((sf - 83.59753)/22.37642, 5),
+                       RE_Z = round((eb - 81.29467)/33.02717, 5),
+                       MH_Z = round((rp - 74.84212)/18.01189, 5),
+                       BP_Z = round((pa - 75.49196)/23.55879, 5),
+                       GH_Z = round((gh - 72.21316)/20.16964, 5))
+
+ORA <- ORA %>% 
+	select(USUBJID, QUESTIONAIRESTYPE, PF_Z:GH_Z) %>% 
+	mutate(AGG_PHYS = round((PF_Z*0.42402) + (RP_Z*0.35119) + (BP_Z*0.31754) + (GH_Z*0.24954) + (VT_Z*0.02877) + (SF_Z*-0.00753) + (RE_Z*-0.19206) + (MH_Z*-0.22069), 2),
+				 AGG_MENT = round((PF_Z*-0.22999) + (RP_Z*-0.12329) + (BP_Z*-0.09731) + (GH_Z*-0.01571) + (VT_Z*0.23534) + (SF_Z*0.26876) + (RE_Z*0.43407) + (MH_Z*0.48581), 2)) %>% 
+	mutate(PCS = 50 + (AGG_PHYS*10),
+				 MCS = 50 + (AGG_MENT*10))
+
+##Describe improvement from Discharge to follow up
+
+change_sf36 <- ORA %>% select(USUBJID, QUESTIONAIRESTYPE, PCS, MCS)
+
+change_sf36 %>% 
+	select(QUESTIONAIRESTYPE:MCS) %>% 
+	tbl_summary(by = QUESTIONAIRESTYPE) %>% 
+	add_p()
+
+##effect of medicine to PCS and MCS
+
+change_sf36 <- left_join(change_sf36, medicineeff_mod, by = "USUBJID")
+
+##Discharge
+changesf36_dis <- change_sf36 %>% filter(QUESTIONAIRESTYPE == "Discharge")
+
+relation <- rcorr(as.matrix(changesf36_dis[,-c(1,2,6:11)]))
+
+dischargecor <- flattenCorrMatrix(relation$r, relation$P) %>% filter(p <= 0.05) ##choose the significant level 0.05
+
+##Follow up
+
+changesf36_fol <- change_sf36 %>% filter(QUESTIONAIRESTYPE == "Follow Up")
+
+relation_fol <- rcorr(as.matrix(changesf36_fol[,-c(1,2,6:11)]))
+
+flattenCorrMatrix(relation_fol$r, relation_fol$P) %>% filter(p <= 0.05)
+
+
+
+##There are significant improve in PCS and MCS score between 2 time points.
+#Orthogonal rotation
+#PF Physical Functioning - pf
+#RP Role Physical - rh
+#BP Bodily Pain - pa
+#GH General Health - gh
+#VT Vitality - ef
+#SF Social Functioning - sf
+#RE Role Emotional - eb
+#MH Mental Health - rp
+```
+
+PCS has correlation to total dose of Pipecuronium, MCS has correlation with PCS and both of PCS and MCS has correlation to muscle size on admission. Muscle change has negative relation with total dose of Diazepam and Midazopam. There is no significant effect of muscle change on the follow up PCS and MCS score.
+
+```{r HAIs}
+icustay <- left_join(demograph, medicineeff, by = "USUBJID")
+
+icumedicine <- rcorr(as.matrix(icustay[,c(3, 33:35)]))
+
+flattenCorrMatrix(icumedicine$r, icumedicine$P) %>% filter(p < 0.05)
+
+HAI <- select(IE_InterventionGrid, USUBJID, INTERVENTIONEVENT, YES) %>% 
+	filter(INTERVENTIONEVENT == "HAIs")
+
+HAItb <- select(timeonset, USUBJID, DAYSOFMECHVENT, geomean, newoutcome) %>% 
+	left_join(HAI, by = "USUBJID") %>% 
+	replace_na(list(
+	YES = FALSE))
+
+HAItb$YES <- as.character(HAItb$YES)
+
+HAItb <- HAItb %>% mutate(YES = ifelse(YES == "TRUE", "HAIs", "Non-HAIs"))
+
+HAItb %>% ungroup() %>% select(geomean, DAYSOFMECHVENT, YES, newoutcome) %>% tbl_summary(by = YES, label = list(
+	DAYSOFMECHVENT ~ "Days of Mechanical vent",
+	geomean ~ "Muscle change",
+	newoutcome ~ "Outcome")) %>% add_p()
+
+library("vcd")
+
+assocstats(xtabs(~HAItb$YES + HAItb$geomean))
+
+chisq.test(HAItb$YES, HAItb$geomean)
+```
+
+```{r EQ5D, eval = FALSE}
+
+quol <- EQ5D %>% 
+	select(USUBJID, TYPEOFQUESTIONAIRS, DISFOLLOWDTC, WALKING:WORRYSADNESS) %>%
+	filter(USUBJID %in% demograph$USUBJID) %>% 
+	filter(USUBJID %in% MUSCLE_MuscleUls$USUBJID) %>% 
+	filter(if_any(c(WALKING:WORRYSADNESS), ~ !is.na(.)))
+
+quol <- quol %>% 
+	mutate(group = case_when(USUBJID %in% tetanus$USUBJID ~ "Tetanus",
+													 USUBJID %in% cns$USUBJID ~ "CNS")) %>% 
+	arrange(USUBJID, DISFOLLOWDTC) %>% 
+	group_by(USUBJID) %>% 
+	group_modify(~.x %>% mutate(TYPEOFQUESTIONAIRS = ifelse(row_number() == 1, "Discharge", "Follow Up"))) %>% 
+	mutate(WORRYSADNESS = str_replace(WORRYSADNESS, "NotWorry", "1")) %>%
+	mutate_at(c("WALKING", "SELFCARE", "BASICROUTINE", "PAIN", "WORRYSADNESS"), ~ as.numeric(.))
+
+##For missing data will be replaced by the mean of 5 components of that individual
+#table1(~ TYPEOFQUESTIONAIRS | group, data = quol)
+
+##Missing data will be counted as mean of the range
+
+quol <- ungroup(quol) %>% 
+	mutate(across(c(WALKING:WORRYSADNESS), ~replace_na(.,round(mean(., na.rm = TRUE), 0))))
+	
+quol <- quol %>% mutate(eq5d = as.numeric(paste(WALKING, SELFCARE, BASICROUTINE, PAIN, WORRYSADNESS, sep = "")))
+
+##convert score to Quality score range
+
+score <- do.call(rbind, import_list("C:/Thaontp/Thao/Muscle/EQ-5D excel VN_ full.xlsx"))
+
+colnames(score) <- c("eqscore", "quolscore")
+
+score$quolscore <- parse_number(score$quolscore)
+
+##look up from dataset to range score
+
+quol <- left_join(quol, score, by = c("eq5d" = "eqscore")) %>% ungroup()
+
+##Muscle data
+
+#quoltb <- quol %>% select(TYPEOFQUESTIONAIRS, WALKING:WORRYSADNESS, quolscore, group) 
+
+#tablescore <- describeBy(quoltb,
+#					 group = list(quoltb$TYPEOFQUESTIONAIRS, quoltb$group),
+#					 mat = TRUE,
+#					 digits = 2) %>% 
+#	select(-c(vars, item, trimmed, mad, skew, kurtosis, se))
+
+#tablescore <- rownames_to_column(tablescore)
+
+#tablescore <- tablescore %>% 
+#	arrange(group2, group1) %>% 
+#	group_by(group2)
+
+#tablescore <- tablescore[!tablescore$rowname %in% c("TYPEOFQUESTIONAIRS*1", "TYPEOFQUESTIONAIRS*2", "TYPEOFQUESTIONAIRS*3", "TYPEOFQUESTIONAIRS*4", "group*1", "group*2", "group*3", "group*4"),]
+
+
+#tablescore <- tablescore %>%
+#	ungroup() %>% 
+#	select(-c(group1, group2, n))
+
+#colnames(tablescore) <- c("Characteristics", "Mean", "SD", "Median", "Min", "Max", "Range")
+
+#tablescore$Characteristics <- gsub("\\d+", "", tablescore$Characteristics)
+
+#tablescore$Characteristics <- str_replace_all(tablescore$Characteristics, 
+#																							c("WALKING" = "Mobility", 
+#																								"SELFCARE" = "Self-care",
+#																								"BASICROUTINE" = "Usual activities",
+#																								"PAIN" = "Pain/Discomfort", 
+#																								"WORRYSADNESS" = "Anxiety/Depression", 
+#																								"quolscore" = "QoL score"))
+
+#Qol <- kbl(tablescore, caption = "EQ5D-5L and Quality of Life Scoring on Discharge and Followup") %>%
+#	kable_styling("striped") %>%
+#	group_rows("CNS", 1, 12) %>%
+#	group_rows("TETANUS", 13, 24) %>% 
+#  pack_rows("Discharge", 1, 6) %>%
+#  pack_rows("Followup", 7, 12) %>%
+#	pack_rows("Discharge", 13, 18) %>%
+#  pack_rows("Followup", 19, 24) %>% 
+#  footnote(general_title = "Note.", footnote_as_chunk = T, 
+#           general = "N CNS Discharge = 28; N CNS Followup = 26; N Tetanus Discharge = 68; N Tetanus Followup = 61")
+
+
+boxplot(quolscore ~ group + TYPEOFQUESTIONAIRS, quol, col = c("blue", "pink"), main = "Quality of life score improvement", names=c("CNS Discharge", "Tetanus Discharge", "CNS Follow Up", "Tetanus Follow Up"), xlab = "", ylab = "Quality of life score")
+
+library(data.table)
+
+total <- quol %>% 
+	select(-quolscore) %>%
+	as.data.table() %>% 
+	melt(measure = c("WALKING", "SELFCARE", "BASICROUTINE", "PAIN", "WORRYSADNESS"),
+			 value.name = "value")
+
+library(scales)
+
+improveeq5d <- total %>% mutate_at(c("value"), ~ as.character(.))
+
+improveeq5d <- improveeq5d %>% rename(Score = value,
+																			Component = variable)
+
+#table1(~ Score |group + TYPEOFQUESTIONAIRS, data = improveeq5d)
+
+##Total
+totaltable <- improveeq5d %>% 
+	group_by(TYPEOFQUESTIONAIRS, Component, Score) %>% 
+	summarise(Freq = n())
+
+totaltableComponent <- factor(totaltable$Component, levels = c("Mobility", "Self-care", "Usual activities", "Pain/Discomfort", "Anxiety/Depression"))
+
+totaltable$Score <- str_replace_all(totaltable$Score, c("1" = "No problem",
+																												"2" = "Slight",
+																												"3" = "Moderate",
+																												"4" = "Severe",
+																												"5" = "Unable"))
+
+totaltable$Score <- factor(totaltable$Score, levels = c("No problem","Slight","Moderate","Severe","Unable"))
+
+graphtotal <- totaltable %>% 
+	group_by(TYPEOFQUESTIONAIRS, Component) %>% 
+	mutate(Percent = round(Freq/sum(Freq),2))
+
+graphpercent <- graphtotal %>%
+  ggplot(data = ., mapping = aes(x = Component, y = Percent, fill = Score)) +
+  geom_col() +
+  geom_text(mapping = aes(label = percent(Percent)),              # converting the values to percent
+            size = 2,                                             # size of the font
+            position = position_stack(vjust = 0.5)) +             # positioning in the middle
+  scale_fill_brewer(palette = "Set3") +                           # coloring the plot
+  facet_grid(.~TYPEOFQUESTIONAIRS) +
+  labs(x = "EQ-5D-5L Components",                                              # labelling x axis
+       y = "Percentage",                                        # labeling y axis
+       title = "EQ-5D score improvement in all CNS and Tetanus patients",        # title
+       fill = "EQ-5D-5L Score") +                               # legend
+  scale_y_continuous(labels = scales::percent_format()) +
+	theme_bw() +         # changing the y axis nber format
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 0.6, size = 8),                      # adjusting the position
+    axis.title.x = element_text(face = "bold"),                   # face the x axit title/label
+    axis.title.y = element_text(face = "bold"),                   # face the y axis title/label
+    plot.title = element_text(hjust = 0.1),                       # positioning the plot title
+    legend.title = element_text(face = "bold")                    # face the legend title
+  )
+
+graphpercent
+
+eq5d_model <- left_join(medicineeff_mod, quol, by = "USUBJID") %>% 
+	ungroup() %>% 
+	select(changeharmonic, TOTALDOSEMIDAZOLAM:TYPEOFQUESTIONAIRS, quolscore) %>% 
+	filter(!is.na(quolscore))
+
+quol_dis <- eq5d_model %>% filter(TYPEOFQUESTIONAIRS == "Discharge")
+
+quol_dis <- rcorr(as.matrix(quol_dis[,-5]))
+
+quoltbdis <- flattenCorrMatrix(quol_dis$r, quol_dis$P) %>% filter(p <= 0.05)
+
+quoltbdis
+
+##choose the significant level 0.05
+
+##Follow up
+
+quol_fol <- eq5d_model %>% filter(TYPEOFQUESTIONAIRS == "Follow Up")
+
+quol_fol <- rcorr(as.matrix(quol_fol[,-5]))
+
+quoltbfol <- flattenCorrMatrix(quol_fol$r, quol_fol$P) %>% filter(p <= 0.05)
+
+quoltbfol
+
+```
+
+```{r death analysis, eval= FALSE}
+
+##outcome
+
+deathanalysis <- timeonset %>% select(USUBJID, newoutcome, changeharmonic)
+
+##HAIs
+
+hosinfect <- IE_InterventionGrid %>% 
+	select(USUBJID, INTERVENTIONEVENT, YES) %>% 
+	filter(INTERVENTIONEVENT == "HAIs") %>% 
+	filter(USUBJID %in% demograph$USUBJID)
+
+##Admission haematology test
+
+hemo <- ADM %>%
+	select(USUBJID, HAEMOGLOBIN:WCC)%>% 
+	filter(USUBJID %in% demograph$USUBJID)
+
+##merging
+
+deathanalysis <- deathanalysis %>% 
+	left_join(hosinfect, by = "USUBJID") %>% 
+	left_join(hemo, by = "USUBJID")
+
+deathanalysis <- deathanalysis %>% mutate(YES = replace_na(YES, FALSE),
+																					HAI = ifelse(YES == TRUE, 1L, 0L),
+																					newoutcome = as.character(newoutcome))
+
+deathanalysis %>% ungroup() %>% select(-c(USUBJID, INTERVENTIONEVENT)) %>% tbl_summary(by = newoutcome, missing = "no") %>% add_p()
+
+
+#The improvement in Quality of life score shows no effect from muscle wasting has contribute in that. Let try at the time of discharge.
+
+#Significant difference in PCS score between discharge and follow up
+
+#The F-value column is the test statistic from the F test. This is the mean square of each independent variable divided by the mean square of the residuals. The larger the F value, the more likely it is that the variation caused by the independent variable is real and not due to chance.
+#The Pr(>F) column is the p-value of the F-statistic. This shows how likely it is that the F-value calculated from the test would have occurred if the null hypothesis of no difference among group means were true.
+```
