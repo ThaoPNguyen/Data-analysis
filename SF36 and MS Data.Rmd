@@ -194,14 +194,16 @@ ggplot(change_muscle, aes(RLeg, LLeg)) +
 
 legs <- lm(RLeg ~ LLeg, data = change_muscle)
 
+summary(legs)$sigma
+
 summary(legs)
 
 ```
 The equation for linear relationship between Right leg and left leg
 
-RLeg = 0.32062 + 0.98421*LLeg
+RLeg = 0.32062 + 0.98421*LLeg + 0.8344652 (Sigma = 0.8344652 is the error or variance of the model)
 
-LLeg = (RLeg - 0.32062)/0.98421
+LLeg = (RLeg - 0.32062 - 0.8344652)/0.98421
 
 We use this equation to predict missed value
 
@@ -211,14 +213,44 @@ We use this equation to predict missed value
 change_muscle <- change_muscle %>% 
 	ungroup() %>% 
 	rowwise() %>% 
-	mutate(RLeg = replace_na(RLeg, round(as.numeric(0.32062 + 0.98421*LLeg), 2)),
-				 LLeg = replace_na(LLeg, round(as.numeric((RLeg - 0.32062)/0.98421), 2)))
+	mutate(RLeg = replace_na(RLeg, round(as.numeric(0.32062 + 0.98421*LLeg + 0.8344652), 2)),
+				 LLeg = replace_na(LLeg, round(as.numeric((RLeg - 0.32062 - 0.8344652)/0.98421), 2)))
 
 ##Each leg muscle size is converted to ratio of the last muscle measurement to the first, so if 0 < rate < 1 the muscle area has decrease, if rate > 1 the muscle has increase, if rate = 1 the muscle is the same. Calculate geometric mean between rateRleg and rateLleg before create the model.
 
+##Length of ICU stay
+
+icustay <- demograph %>% 
+	select(USUBJID, Stayicu)
+
+##Choose time 3 and time 1 to calculate muscle loss per day (divided by LOS in ICU)
+
+change_muscle_day <- change_muscle %>% 
+	filter(!MUSCLE_SEQ == 4) %>%
+	group_by(USUBJID) %>% 
+	group_by(USUBJID, MUSCLE_SEQ) %>% 
+	mutate(meangeom = geometric.mean(c(RLeg, LLeg)))
+
+change_muscle_day <- change_muscle_day %>% 
+	select(USUBJID, MUSCLE_SEQ, meangeom) %>% 
+	pivot_wider(names_from = MUSCLE_SEQ, values_from = meangeom)
+
+change_muscle_day <- change_muscle_day %>% 
+	group_by(USUBJID) %>% 
+	mutate(stage1 = round((`1` - `2`)/`1`, 3),
+				 stage2 = round((`2` - `3`)/`2`, 3),
+				 admission_discharge = round((`1` - `3`)/`1`, 3)) %>% 
+	left_join(icustay, by = "USUBJID")
+
+change_muscle_day <- change_muscle_day %>% 
+	filter(if_any(c(stage1:stage2), ~ !is.na(.)))
+
+change_muscle_day %>% ungroup() %>% select(stage1:Stayicu) %>% tbl_summary()
 ```
 
 Muscle change are no longer belong to AGE, SEX and WEIGHT. The model show that: in admission the size of muscle are distributed in the context of other's effect, but the muscle loss don't dependent on physical factors, so we should turn to clinical factors or efficacy of treatment. 
+
+One metaanalysis called "The rate and assessment of muscle wasting during critical illness: a systematic review and meta-analysis" concluded that ICU patient will loss 2% of skeletal muscle per day during the first week of ICU admission, so that should be a strong argument for the generalized muscle wasting in Tetanus and CNS.
 
 ```{r, Method 1}
 
