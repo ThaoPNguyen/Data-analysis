@@ -138,7 +138,7 @@ muscleadmission <- muscle %>%
 geomadmission <- muscleadmission %>% 
 	group_by(USUBJID) %>% 
 	mutate(ad_muscle = round(geometric.mean(c(AVERAGE[XSECTIONAREA == "RLeg"], AVERAGE[XSECTIONAREA == "LLeg"])), 3)) %>% 
-	select(-XSECTIONAREA) %>% 
+	select(-c(XSECTIONAREA, AVERAGE)) %>% 
 	unique()
 
 #pairs(data = geomadmission,
@@ -194,6 +194,8 @@ ggplot(change_muscle, aes(RLeg, LLeg)) +
 
 legs <- lm(RLeg ~ LLeg, data = change_muscle)
 
+tab_model(legs)
+
 summary(legs)$sigma
 
 summary(legs)
@@ -243,10 +245,23 @@ change_muscle_day <- change_muscle_day %>%
 	left_join(icustay, by = "USUBJID")
 
 change_muscle_day <- change_muscle_day %>% 
-	filter(if_any(c(stage1:stage2), ~ !is.na(.)))
+	mutate(perday = ifelse(!is.na(admission_discharge), round(admission_discharge/Stayicu, 3), NA))
 
-change_muscle_day %>% ungroup() %>% select(stage1:Stayicu) %>% tbl_summary()
+change_muscle_day <- change_muscle_day %>% 
+	filter(if_any(c(stage1:admission_discharge), ~ !is.na(.)))
+
+change_muscle_day <- change_muscle_day %>% 
+	mutate(staygroup = case_when(Stayicu <= 10 ~ "10 days",
+															 Stayicu > 10 & Stayicu <= 15 ~ "11-15 days",
+															 Stayicu > 15 & Stayicu <= 20 ~ "16-20 days",
+															 Stayicu > 20 & Stayicu <= 25 ~ "21-25 days",
+															 Stayicu > 25 & Stayicu <= 30 ~ "26-30 days",
+															 TRUE ~ "More than 30 days"))
+
+change_muscle_day %>% ungroup() %>% select(stage1:staygroup) %>% tbl_summary(by = staygroup, missing = "no")
+
 ```
+Muscle stage2 show larger change in days 21-25.
 
 Muscle change are no longer belong to AGE, SEX and WEIGHT. The model show that: in admission the size of muscle are distributed in the context of other's effect, but the muscle loss don't dependent on physical factors, so we should turn to clinical factors or efficacy of treatment. 
 
