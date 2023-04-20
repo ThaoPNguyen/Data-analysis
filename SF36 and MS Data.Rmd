@@ -40,6 +40,8 @@ library(nlme)
 library(Hmisc)
 library(ggeffects)
 library(data.table)
+library(vcd)
+library(Amelia)
 fulldata <- import_list("C:/Thaontp/Thao/Muscle/DataFeb2023.xlsx")
 
 list2env(fulldata, .GlobalEnv)
@@ -203,11 +205,11 @@ summary(legs)
 ```
 The equation for linear relationship between Right leg and left leg
 
-RLeg = 0.32062 + 0.98421*LLeg + 0.8344652 (Sigma = 0.8344652 is the error or variance of the model)
+$\displaystyle RLeg = 0.32062 + $ $0.98421 \times LLeg$ $ + 0.8344652$ ($\varepsilon = 0.8344652$ is the error or variance of the model)
 
-LLeg = (RLeg - 0.32062 - 0.8344652)/0.98421
+$\displaystyle LLeg = \frac{RLeg- 0.32062 - 0.8344652}{0.98421}$
 
-We use this equation to predict missed value
+We use this equation to predict missed values.
 
 ```{r}
 ##Add-in missing rows
@@ -245,50 +247,29 @@ change_muscle_day <- change_muscle_day %>%
 	left_join(icustay, by = "USUBJID")
 
 change_muscle_day <- change_muscle_day %>% 
-	mutate(perday = ifelse(!is.na(admission_discharge), round(admission_discharge/Stayicu, 3), NA))
-
-change_muscle_day <- change_muscle_day %>% 
+	mutate(perday = ifelse(!is.na(admission_discharge), round(admission_discharge/Stayicu, 3), NA)) %>% 
 	filter(if_any(c(stage1:admission_discharge), ~ !is.na(.)))
 
 change_muscle_day <- change_muscle_day %>% 
+	mutate_at(c("stage1", "stage2", "admission_discharge", "perday"), ~as.numeric(100*.))
+
+change_muscle_day <- change_muscle_day %>% 
 	mutate(staygroup = case_when(Stayicu <= 10 ~ "10 days",
-															 Stayicu > 10 & Stayicu <= 15 ~ "11-15 days",
-															 Stayicu > 15 & Stayicu <= 20 ~ "16-20 days",
-															 Stayicu > 20 & Stayicu <= 25 ~ "21-25 days",
-															 Stayicu > 25 & Stayicu <= 30 ~ "26-30 days",
+															 Stayicu > 10 & Stayicu <= 20 ~ "11-20 days",
+															 Stayicu > 20 & Stayicu <= 30 ~ "21-30 days",
 															 TRUE ~ "More than 30 days"))
 
-change_muscle_day %>% ungroup() %>% select(stage1:staygroup) %>% tbl_summary(by = staygroup, missing = "no")
+change_muscle_day %>% 
+	ungroup() %>% 
+	select(stage1:staygroup) %>% 
+	tbl_summary(by = staygroup, missing = "no", label = list(stage1 ~ "MW during first 7 days", stage2 ~ "MW during later ICU period", admission_discharge ~ "Total MW in ICU", Stayicu ~ "ICU length of stay", perday ~ "Total MW per day")) %>% 
+	as_gt() %>%
+  gt::tab_source_note(gt::md("*MW: Muscle wasting measured by percentage*"))
 
 ```
-Muscle stage2 show larger change in days 21-25.
+Look at the first and second rows, MW happens the most dramatic in days 21-30, patients with the higher rate of MW at first 7 days can have 2 possible outcomes: ICU stay shorter than 10 days or higher than 30 days. In the MW per day (which is equal to total MW divided by LOS in ICU) could have been inverse linear with increasing in LOS but it gets its highest peek at period 21-30, so we can see the MW occurs significantly during this time and stop happening after that or the patients start to gain muscle back.
 
 Muscle change are no longer belong to AGE, SEX and WEIGHT. The model show that: in admission the size of muscle are distributed in the context of other's effect, but the muscle loss don't dependent on physical factors, so we should turn to clinical factors or efficacy of treatment. 
-
-One metaanalysis called "The rate and assessment of muscle wasting during critical illness: a systematic review and meta-analysis" concluded that ICU patient will loss 2% of skeletal muscle per day during the first week of ICU admission, so that should be a strong argument for the generalized muscle wasting in Tetanus and CNS.
-
-```{r, Method 1}
-
-change_muscle3 <- change_muscle %>% filter(MUSCLE_SEQ == max(MUSCLE_SEQ) | MUSCLE_SEQ == min(MUSCLE_SEQ))
-
-change_muscle3 <- change_muscle3 %>% 
-	group_by(USUBJID) %>% 
-	mutate(rateRleg = round(RLeg[which.max(MUSCLE_SEQ)]/RLeg[which.min(MUSCLE_SEQ)], 3),
-				 rateLleg = round(LLeg[which.max(MUSCLE_SEQ)]/LLeg[which.min(MUSCLE_SEQ)], 3)) %>% 
-	select(USUBJID, rateRleg, rateLleg) %>%
-	unique() %>% 
-	mutate(geomean = round(geometric.mean(c(rateRleg, rateLleg)), 3))
-
-change_muscle3 <- left_join(change_muscle3, geomadmission, by = "USUBJID") %>% 
-	select(-c(rateRleg, rateLleg, AVERAGE)) %>% 
-	unique() %>% 
-	filter(!is.na(AGE))
-
-testchange <- glm(geomean ~ WEIGHT + SEX + AGE, data = change_muscle3)
-
-tab_model(testchange)
-
-```
 
 Model of trending in muscle loss with Subject ID is a random effect (because we want to see the change between time points, the Individual and their intrinsic physiology are assumed to be just random factor).
 ```{r}
@@ -316,20 +297,18 @@ timeonset <- rbind(timeonset_te, timeonset_cns) %>%
 	unique() %>% 
 	mutate(newoutcome = if_else(if_any(c("OUTCOME", "Note"), ~. %in% c("TransferToDie", "Death")) == TRUE, "Death", "Alive")) %>% ##New outcome during follow up
 	filter(row_number() == n()) %>% 
-	filter(USUBJID %in% demograph$USUBJID) %>% 
-	left_join(change_muscle3, by = "USUBJID")
+	filter(USUBJID %in% demograph$USUBJID)
 
 #admission_muscle <- select(muscleadmission, USUBJID, AVERAGE)
 
-timeonset <- timeonset %>%
+#timeonset <- timeonset %>%
 	#select(-changeLleg) %>% 
 	#rename(changesum = changeRleg) %>% 
-	mutate(newoutcome = factor(newoutcome, level = c("Alive", "Death")),
-				 SEX = factor(SEX, level = c("Male", "Female")))
+#	mutate(newoutcome = factor(newoutcome, level = c("Alive", "Death")),
+#				 SEX = factor(SEX, level = c("Male", "Female")))
 
 timeonset <- timeonset %>% replace_na(list(
-	FIRSTSYMTOHOSPPERIOD = round(mean(timeonset$FIRSTSYMTOHOSPPERIOD, na.rm = TRUE), 0), 
-	geomean = round(mean(timeonset$geomean, na.rm = TRUE), 0)))
+	FIRSTSYMTOHOSPPERIOD = round(mean(timeonset$FIRSTSYMTOHOSPPERIOD, na.rm = TRUE), 0)))
 
 ##Join newoutcome to demograph
 
@@ -387,70 +366,6 @@ ggpredict(model2, terms = c("MUSCLE_SEQ", "newoutcome")) %>% plot()
 ```
 
 
-```{r, Method 2}
-
-geomalltime <- change_muscle %>% 
-	group_by(USUBJID, MUSCLE_SEQ) %>% 
-	mutate(muscle = round(geometric.mean(c(RLeg, LLeg)), 3)) %>%
-	select(MUSCLE_SEQ, USUBJID, muscle) %>% 
-	unique()
-
-model3 <- lmer(muscle ~ MUSCLE_SEQ + (MUSCLE_SEQ|USUBJID), data = geomalltime)
-
-ggpredict(model3, terms = c('MUSCLE_SEQ')) %>% plot()
-
-###
-
-geomalltime <- left_join(geomalltime, newoutcome, by = "USUBJID")
-
-geomalltime$newoutcome <- factor(geomalltime$newoutcome, levels = c("Alive", "Death"))
-
-model4 = lme(muscle ~ MUSCLE_SEQ + newoutcome, random = ~1|USUBJID,
-            data=geomalltime,
-            method="REML")
-
-
-ggpredict(model4, terms = c("MUSCLE_SEQ", "newoutcome")) %>% plot()
-
-	#select(-XSECTIONAREA) %>% 
-	#unique()
-
-#tab_model(testchange)
-
-#tab_model(testchange1)
-
-#plot_model(testchange, type = "diag")
-
-
-##Choose the model with BIC closer to zero
-
-##The muscle loss is calculated by difference between last measurement and first measurement (for those having time point 3 and 4). For those missing the time point 3 and don't have time 4, we will count difference of time 2 and 1. This mean we take into account of any muscle loss during hospitalization.
-
-```
-
-```{r muscle sequence}
-
-geomalltime <- geomalltime %>% 
-	mutate(MUSCLE_SEQ = factor(MUSCLE_SEQ))
-
-##Exclude MUSCLE_SEQ = 4 because there are only 2 patients measured, and the muscle values are same as MUSCLE_SEQ = 3
-
-##Muscle loss in unit day From SEQ 1 (admission) to SEQ 2 (2->7 days after admission, so we choose mean of days = 4.5 from admission)
-
-
-tablemuscle <- ungroup(geomalltime) %>%
-	select(-newoutcome) %>% 
-	filter(MUSCLE_SEQ != 4) %>% 
-	pivot_wider(names_from = MUSCLE_SEQ, values_from = muscle) %>% 
-	left_join(icustay, by = "USUBJID") %>% 
-	select(USUBJID, AGE, SEX, Stayicu, OUTCOME, newoutcome, `1`:`3`)
-
-tablemuscle_stage <- tablemuscle %>% 
-	rowwise() %>% 
-	mutate(stage1 = as.numeric(`2` - `1`),
-				 stage2 = as.numeric(`3` - `2`))
-```
-
 ```{r relation to onset period}
 
 demograph <- left_join(demograph, newoutcome, by = "USUBJID")
@@ -488,13 +403,39 @@ demo
 ```
 
 ```{r}
- ## Use arithmetic mean of all sample for missing data 
+mtab <- change_muscle_day %>% 
+	select(USUBJID, admission_discharge)
 
-#xyplot(Stayicu ~ FIRSTSYMTOHOSPPERIOD, group= newoutcome, data=timeonset, auto.key=list(space="right"), jitter.x=TRUE, jitter.y=TRUE)
+mtab <- timeonset %>% 
+	left_join(mtab, by = "USUBJID") %>% 
+	select(USUBJID, DAYSOFMECHVENT, admission_discharge) %>% 
+	left_join(demograph, by = "USUBJID") %>% 
+	left_join(HAI, by = "USUBJID")
 
-##Control the effect of mechanical vent and fix the onset time, QUESTION: whether there is an association between time of onset and ICU stay after controlling for the variation in days of mechanical vent
+mtab <- mtab %>% 
+	mutate(newoutcome = ifelse(newoutcome == "Death", 1, 0),
+				 SEX = ifelse(SEX == "Female", 1, 0),
+				 YES = if_else(YES == "TRUE", 1, 0, 0))
+```
+The histogram of total muscle change likely to be normal distribution with p-value for Shapiro-Wilk test 0.1759 (we received the p-value > 0.05). So the missing value will be replaced by sample mean.
 
-library(Amelia)
+```{r}
+
+mtab <- mtab %>% mutate(admission_discharge = replace_na(admission_discharge, mean(mtab$admission_discharge, na.rm = TRUE)))
+
+rrmodel <- glm(newoutcome ~ YES + Stayicu + DAYSOFMECHVENT + admission_discharge, data = mtab, family = poisson())
+
+tbl_regression(rrmodel, exponentiate = T, label = c(YES ~ "HAIs", DAYSOFMECHVENT ~ "Days of MV", Stayicu ~ "ICU length of stay (days)", admission_discharge ~ "Muscle wasting (%)")) %>% bold_labels()
+
+```
+The HAIs is not the cause to death outcome, which even has $\displaystyle IRR = \frac{HAIsDeath}{NonHAIsDeath}$ 0.26 meaning that patients with HAIs are less likely to be death. While longer days of MV can give higher risk to death outcome.
+
+Patients with longer stay in ICU tend to have alive outcome. And muscle wasting can be an indicator for alive outcome.
+
+One meta-analysis called "The rate and assessment of muscle wasting during critical illness: a systematic review and meta-analysis" concluded that ICU patient will loss 2% of skeletal muscle per day during the first week of ICU admission, so that should be a strong argument for the presence of muscle wasting in these patients.
+```{r eval = FALSE}
+
+
 #missmap(timeonset, main = "Missing values vs observed")
 
 ##Edit missing data by mean of all sample
@@ -506,16 +447,16 @@ library(Amelia)
 
 ##Add random effect (confounder) as WEIGHT and BMI
 
-raneff <- ADM %>% 
-	select(USUBJID, WEIGHT, HEIGHT) %>% 
-	unique()%>% 
-	mutate(BMI = round(WEIGHT/(HEIGHT/100)^2, 2)) ##There are some patients don't have admission muscle so when first calculate BMI we didn't include them, this will be calculated again
+#raneff <- ADM %>% 
+#	select(USUBJID, WEIGHT, HEIGHT) %>% 
+#	unique()%>% 
+#	mutate(BMI = round(WEIGHT/(HEIGHT/100)^2, 2)) ##There are some patients don't have admission muscle so when first calculate BMI we didn't include them, this will be calculated again
 
-timeonset <- timeonset %>% left_join(raneff, by = "USUBJID")  %>% select(-Note)
+#timeonset <- timeonset %>% left_join(raneff, by = "USUBJID")  %>% select(-Note)
 
 ##add the difference of muscle after all (negative results are muscle loss, positive results are muscle gain)
 
-timeonset <- timeonset %>% mutate(musclewaste = as.numeric(geomean - 1))
+#timeonset <- timeonset %>% mutate(musclewaste = as.numeric(geomean - 1))
 
 #model_test <- glmer(newoutcome ~ geomean + DAYSOFMECHVENT + geomean*Stayicu + (1|BMI) + (1|AGE), data = timeonset, family = "binomial")
 
@@ -569,9 +510,8 @@ timeonset <- timeonset %>% mutate(musclewaste = as.numeric(geomean - 1))
 
 
 ```{r medicine doses}
-medicineeff <- DIS %>% select(USUBJID, TOTALDOSEMIDAZOLAM, TOTALDOSEDIAZEPAM, TOTALDOSEPIPER)
-
-medicineeff_mod <- left_join(change_muscle3, medicineeff, by = "USUBJID")
+medicineeff <- left_join(mtab, DIS) %>% 
+	select(USUBJID:admission_discharge, Stayicu, YES, TOTALDOSEMIDAZOLAM:TOTALDOSEPIPER)
 
 flattenCorrMatrix <- function(cormat, pmat) {
   ut <- upper.tri(cormat)
@@ -585,20 +525,15 @@ flattenCorrMatrix <- function(cormat, pmat) {
 
 ##Discharge
 
-relation_glance <- rcorr(as.matrix(medicineeff_mod[,-c(1,3:8)]))
+relation_glance <- rcorr(as.matrix(medicineeff[,-c(1,5)]))
 
 flattenCorrMatrix(relation_glance$r, relation_glance$P) %>% filter(p <= 0.05)
 
-##Piper on muscle wasting
 
-#lm(formula = geomean ~ TOTALDOSEPIPER, data = medicineeff_mod)
 
-##The coefficient of Piper on muscle change is 1.642e-01, this show very weak effect created by using Pipercuronum to reduce muscle wasting.
 ```
+Total muscle wasting inversely correlates with ICU LOS (They gained muscle back for later period in ICU??) and Diazepam doses.
 
-geomean: muscle change, the higher geomean than 1, the more increase in muscle, if geomean < 1 this mean muscle size decrease.
-
-ad_muscle: muscle admission (take geometric mean of Right leg and left leg)
 ```{r sf36}
 
 ##clean enough data for SF36
@@ -739,24 +674,23 @@ change_sf36 %>%
 
 ##effect of medicine to PCS and MCS
 
-change_sf36 <- left_join(change_sf36, medicineeff_mod, by = "USUBJID")
+change_sf36 <- left_join(change_sf36, medicineeff, by = "USUBJID")
 
 ##Discharge
 changesf36_dis <- change_sf36 %>% filter(QUESTIONAIRESTYPE == "Discharge")
 
-relation <- rcorr(as.matrix(changesf36_dis[,-c(1,2,6:11)]))
+relation <- rcorr(as.matrix(changesf36_dis[,-c(1,2,8)]))
 
 dischargecor <- flattenCorrMatrix(relation$r, relation$P) %>% filter(p <= 0.05) ##choose the significant level 0.05
 
+dischargecor
 ##Follow up
 
 changesf36_fol <- change_sf36 %>% filter(QUESTIONAIRESTYPE == "Follow Up")
 
 relation_fol <- rcorr(as.matrix(changesf36_fol[,-c(1,2,6:11)]))
 
-flattenCorrMatrix(relation_fol$r, relation_fol$P) %>% filter(p <= 0.05)
-
-
+folcor <- flattenCorrMatrix(relation_fol$r, relation_fol$P) %>% filter(p <= 0.05)
 
 ##There are significant improve in PCS and MCS score between 2 time points.
 #Orthogonal rotation
@@ -768,9 +702,17 @@ flattenCorrMatrix(relation_fol$r, relation_fol$P) %>% filter(p <= 0.05)
 #SF Social Functioning - sf
 #RE Role Emotional - eb
 #MH Mental Health - rp
+
+test1 <- aov(admission_discharge ~ PCS + MCS, data = changesf36_dis)
+
+summary(test1)
+
+test2 <- aov(admission_discharge ~ PCS + MCS, data = changesf36_fol)
+
+summary(test2)
+
 ```
 
-PCS has correlation to total dose of Pipecuronium, MCS has correlation with PCS and both of PCS and MCS has correlation to muscle size on admission. Muscle change has negative relation with total dose of Diazepam and Midazopam. There is no significant effect of muscle change on the follow up PCS and MCS score.
 
 ```{r HAIs}
 icustay <- left_join(demograph, medicineeff, by = "USUBJID")
