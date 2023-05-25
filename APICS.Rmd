@@ -55,25 +55,33 @@ teadmission <- teadmission %>% mutate_at(vars("date_of_admission", "date_of_admi
 
 teadmission <- teadmission %>% filter(date_of_admission >= "2021-01-01")
 
+tedischarge <- tedischarge %>% filter(patient_id %in% teadmission$patient_id)
+
 admission <- admission %>% mutate_at(vars("date_of_admission", "date_of_admission_hospital", "Discharge.date_of_discharge", "Discharge.date_of_hospital_discharge"), ~as.Date(.))
+
+admission_date <- admission %>% 
+	select(patient_id, date_of_admission)
 
 admission <- admission %>% 
 	filter(patient_id %in% teadmission$patient_id) %>% 
-	select(patient_id, Admission.age, Admission.gender, Admission.fee_paying_method, Admission.comorbid_conditions, AdmissionAssessment.mechanically_ventilated, AdmissionAssessment.mechanically_ventilated_source, AdmissionAssessment.gcs_eye:AdmissionAssessment.gcs_motor, date_of_admission, date_of_admission_hospital, Discharge.date_of_discharge, Discharge.date_of_hospital_discharge, Discharge.discharge_status, AdmissionAssessment.antibiotics_pre_icu_admission, AdmissionAssessment.name_of_the_antibiotic:AdmissionAssessment.name_of_the_antibiotic_other, AdmissionAssessment.mechanically_ventilated, Discharge.cost_icu, Discharge.hospital_cost, Discharge.hospital_discharge_status)
+	select(patient_id, Admission.age, Admission.gender, Admission.fee_paying_method, Admission.comorbid_conditions, AdmissionAssessment.mechanically_ventilated, AdmissionAssessment.mechanically_ventilated_source, AdmissionAssessment.gcs_eye:AdmissionAssessment.gcs_motor, date_of_admission, date_of_admission_hospital, Discharge.date_of_discharge, Discharge.date_of_hospital_discharge, Discharge.discharge_status, AdmissionAssessment.antibiotics_pre_icu_admission, AdmissionAssessment.name_of_the_antibiotic:AdmissionAssessment.name_of_the_antibiotic_other, AdmissionAssessment.mechanically_ventilated, Discharge.cost_icu, Discharge.hospital_cost, Discharge.icu_cost, Discharge.hospital_discharge_status)
+
+admission <- admission %>% 
+	mutate_at(vars("AdmissionAssessment.name_of_the_antibiotic", "AdmissionAssessment.name_of_the_antibiotic2", "AdmissionAssessment.name_of_the_antibiotic3", "AdmissionAssessment.name_of_the_antibiotic4", "AdmissionAssessment.name_of_the_antibiotic5", "AdmissionAssessment.name_of_the_antibiotic_other"), ~ na_if(.,""))
 
 upgrade <- tedischarge %>% select(patient_id, TetanusPreDischarge.mechanically_ventilated)
 
 admission <- left_join(admission, upgrade, by = "patient_id")
 
-admission <- admission %>% mutate_at(vars("AdmissionAssessment.name_of_the_antibiotic", "AdmissionAssessment.name_of_the_antibiotic2", "AdmissionAssessment.name_of_the_antibiotic3", "AdmissionAssessment.name_of_the_antibiotic4", "AdmissionAssessment.name_of_the_antibiotic5", "AdmissionAssessment.name_of_the_antibiotic_other"), ~ na_if(.,""))
-
 admission <- admission %>% 
 	mutate(Admission.comorbid_conditions = ifelse(Admission.comorbid_conditions == "None", "No", "Yes"),
 				 icustay = as.numeric(Discharge.date_of_discharge - date_of_admission),
 				 hosstay = as.numeric(Discharge.date_of_hospital_discharge - date_of_admission_hospital),
-				 upgrade = ifelse(AdmissionAssessment.mechanically_ventilated == "self_vent" & TetanusPreDischarge.mechanically_ventilated == "mechanical_vent", "Yes", "No"))
+				 upgrade = ifelse(AdmissionAssessment.mechanically_ventilated == "self_vent" & TetanusPreDischarge.mechanically_ventilated == "mechanical_vent", "Yes", "No"),
+				 Insurance = ifelse(Admission.fee_paying_method == "Self/out of pocket", "No", "Yes"))
 
-admission <- admission %>% mutate(antibiotics = rowSums(!is.na(select(., AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other))))
+admission <- admission %>% 
+	mutate(antibiotics = rowSums(!is.na(select(., AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other))))
 
 ##GCS
 
@@ -96,9 +104,15 @@ admission <- admission %>%
 
 admission <- admission %>% mutate(gcs = eye + verbal + motor)
 
+admission <- admission %>% 
+	group_by(patient_id) %>% 
+	mutate(Discharge.cost_icu = ifelse(is.na(Discharge.cost_icu), as.numeric(max(Discharge.hospital_cost, Discharge.icu_cost, na.rm = TRUE)), as.numeric(Discharge.cost_icu))) %>% 
+	ungroup() %>% 
+	select(-c(Admission.fee_paying_method, AdmissionAssessment.mechanically_ventilated, AdmissionAssessment.mechanically_ventilated_source:Discharge.date_of_hospital_discharge, starts_with("AdmissionAssessment.name_of_the_antibiotic"), Discharge.hospital_cost:TetanusPreDischarge.mechanically_ventilated, eye:motor))
 
 
-tetanus <- teadmission %>% select(patient_id, TetanusAdmission.ablett_score, TetanusAdmission.asa_score, TetanusAdmission.occupation, TetanusAdmission.address, TetanusAdmission.source_of_admission, TetanusAdmission.wound, TetanusAdmission.incubation_period, TetanusAdmission.time_period_from_1st_symptom_to_hospital_admis, TetanusAdmission.period_of_onset)
+tetanus <- teadmission %>% 
+	select(patient_id, TetanusAdmission.ablett_score, TetanusAdmission.asa_score, TetanusAdmission.occupation, TetanusAdmission.address, TetanusAdmission.source_of_admission, TetanusAdmission.wound, TetanusAdmission.incubation_period, TetanusAdmission.time_period_from_1st_symptom_to_hospital_admis, TetanusAdmission.period_of_onset)
 
 tetanus <- tetanus %>% mutate(Place = ifelse(str_detect(TetanusAdmission.address, regex("HCM|HCMC|Chi Minh|TPHCM", ignore_case = TRUE)) == TRUE, "HCM City", "Country side"),
 															Occupation = ifelse(!TetanusAdmission.occupation %in% c("Farmer", "Worker", "Elderly"), "Other", TetanusAdmission.occupation),
@@ -113,9 +127,34 @@ tetanus <- tetanus %>% mutate(Place = ifelse(str_detect(TetanusAdmission.address
 
 admission <- left_join(admission, tetanus, by = "patient_id")
 
-admission <- admission %>% mutate(Insurance = ifelse(Admission.fee_paying_method == "Self/out of pocket", "No", "Yes"))
 
-admission %>% select(-c(patient_id, AdmissionAssessment.gcs_eye:Discharge.date_of_hospital_discharge, eye:motor, TetanusAdmission.ablett_score:TetanusAdmission.address, AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other, TetanusPreDischarge.mechanically_ventilated, TetanusAdmission.period_of_onset)) %>% tbl_summary(by = Ablett, statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)"
+##Predischarge
+
+predischarge <- tedischarge %>% 
+	select(patient_id, TetanusPreDischarge.start_date1, starts_with("TetanusPreDischarge.pre_discharge_complication")) %>% 
+	left_join(admission_date, by = "patient_id") %>% 
+	mutate(ANSD = rowSums(select(.,starts_with("TetanusPreDischarge.pre_discharge_complication")) == "Autonomic dysfunction"),
+				 Sepsis = rowSums(select(.,starts_with("TetanusPreDischarge.pre_discharge_complication")) == "Sepsis"),
+				 TetanusPreDischarge.start_date1 = as.Date(TetanusPreDischarge.start_date1),
+				 Time_to_urine = as.numeric(TetanusPreDischarge.start_date1 - date_of_admission)) %>% 
+	select(patient_id, ANSD, Sepsis, Time_to_urine)
+
+predischarge <- predischarge %>% 
+	mutate(ANSD = if_else(ANSD == 1, "Yes", "No", "No"),
+				 Sepsis = if_else(Sepsis == 1, "Yes", "No", "No"))
+
+admission <- admission %>% 
+	left_join(predischarge, by = "patient_id")
+
+##Daily
+
+daily_dt <- daily %>% 
+	select(patient_id, DailyAssessment.date_of_daily_assessment, DailyAssessment.mechanically_ventilated, DailyAssessment.urinary_catheterization, starts_with(c("DailyAssessment.infection", "DailyAssessment.source", "DailyAssessment.hos_acquired", "DailyAssessment.culture_report", "DailyAssessment.culture_date", "DailyAssessment.type_of_culture", "DailyAssessment.organism")))
+
+##Table
+admission %>% select(-c(patient_id, AdmissionAssessment.gcs_eye:Discharge.date_of_hospital_discharge, eye:motor, TetanusAdmission.ablett_score:TetanusAdmission.address, AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other, AdmissionAssessment.mechanically_ventilated_source, TetanusPreDischarge.mechanically_ventilated, TetanusAdmission.period_of_onset)) %>% tbl_summary(by = Ablett, statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)"
     ), label = c(Admission.age ~ "Age", Admission.gender ~ "Gender", TetanusAdmission.time_period_from_1st_symptom_to_hospital_admis ~ "First symptom to admission")) %>% add_p()
+
+
 ```
 
