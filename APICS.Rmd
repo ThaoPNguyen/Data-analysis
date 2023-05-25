@@ -136,8 +136,8 @@ predischarge <- tedischarge %>%
 	mutate(ANSD = rowSums(select(.,starts_with("TetanusPreDischarge.pre_discharge_complication")) == "Autonomic dysfunction"),
 				 Sepsis = rowSums(select(.,starts_with("TetanusPreDischarge.pre_discharge_complication")) == "Sepsis"),
 				 TetanusPreDischarge.start_date1 = as.Date(TetanusPreDischarge.start_date1),
-				 Time_to_urine = as.numeric(TetanusPreDischarge.start_date1 - date_of_admission)) %>% 
-	select(patient_id, ANSD, Sepsis, Time_to_urine)
+				 Time_Ablett = as.numeric(TetanusPreDischarge.start_date1 - date_of_admission)) %>% 
+	select(patient_id, ANSD, Sepsis, Time_Ablett)
 
 predischarge <- predischarge %>% 
 	mutate(ANSD = if_else(ANSD == 1, "Yes", "No", "No"),
@@ -149,7 +149,42 @@ admission <- admission %>%
 ##Daily
 
 daily_dt <- daily %>% 
-	select(patient_id, DailyAssessment.date_of_daily_assessment, DailyAssessment.mechanically_ventilated, DailyAssessment.urinary_catheterization, starts_with(c("DailyAssessment.infection", "DailyAssessment.source", "DailyAssessment.hos_acquired", "DailyAssessment.culture_report", "DailyAssessment.culture_date", "DailyAssessment.type_of_culture", "DailyAssessment.organism")))
+	filter(patient_id %in% teadmission$patient_id) %>% 
+	select(patient_id, DailyAssessment.date_of_daily_assessment, DailyAssessment.mechanically_ventilated, DailyAssessment.urinary_catheterization, starts_with(c("DailyAssessment.infection", "DailyAssessment.source", "DailyAssessment.hos_acquired", "DailyAssessment.culture_report", "DailyAssessment.culture_date", "DailyAssessment.type_of_culture", "DailyAssessment.organism"))) %>% 
+	left_join(admission_date, by= "patient_id")
+
+##Count days
+
+days_of_inter <- daily_dt %>% 
+	arrange(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
+	group_by(patient_id) %>% 
+	mutate(Ventday = sum(DailyAssessment.mechanically_ventilated == "mechanical_vent"),
+				 Urinecath = sum(DailyAssessment.urinary_catheterization %in% c("Insitu", "New")),
+				 Firsturine = ifelse(DailyAssessment.urinary_catheterization %in% c("Insitu", "New"), DailyAssessment.date_of_daily_assessment, NA),
+				 Firsturine = as.Date(Firsturine[which.min(is.na(Firsturine))]),
+				 Time_to_first_urine = as.numeric(Firsturine - date_of_admission)) %>% 
+	ungroup() %>% 
+	select(patient_id, Ventday, Urinecath, Time_to_first_urine) %>% 
+	unique()
+
+admission <- admission %>% 
+	left_join(days_of_inter, by = "patient_id")
+
+##CAUTI
+
+daily_dt <- daily_dt %>% 
+	mutate_at(vars(starts_with("DailyAssessment.culture_date")), ~as.Date(.)) %>% 
+	select(-c(DailyAssessment.mechanically_ventilated))
+
+library(data.table)
+
+culture_long <- as.data.table(daily_dt)  %>% 
+    melt(measure = patterns("^DailyAssessment.infection","^DailyAssessment.source", 
+                            "^DailyAssessment.hos_acquired",
+                            "^DailyAssessment.culture_report", "^DailyAssessment.culture_date","^DailyAssessment.type_of_culture", "^DailyAssessment.organism"),
+         value.name = c("DailyAssessment.infection","DailyAssessment.source", 
+                        "DailyAssessment.hos_acquired",
+                        "DailyAssessment.culture_report", "DailyAssessment.culture_date", "DailyAssessment.type_of_culture", "DailyAssessment.organism")) 
 
 ##Table
 admission %>% select(-c(patient_id, AdmissionAssessment.gcs_eye:Discharge.date_of_hospital_discharge, eye:motor, TetanusAdmission.ablett_score:TetanusAdmission.address, AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other, AdmissionAssessment.mechanically_ventilated_source, TetanusPreDischarge.mechanically_ventilated, TetanusAdmission.period_of_onset)) %>% tbl_summary(by = Ablett, statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)"
