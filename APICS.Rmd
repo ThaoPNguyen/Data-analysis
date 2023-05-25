@@ -1,0 +1,121 @@
+---
+title: "APICS"
+author: "Thao Nguyen"
+date: "2023-05-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r libraries loading}
+library(tidyverse)
+library(dplyr)
+library(gtsummary)
+library(ggplot2)
+library(table1)
+```
+
+```{r files loading}
+admission_file <- list.files(path = "C:/Thaontp/Thao/APICS/Data-analysis",
+												pattern = "CoreForms.*.csv",
+												recursive = TRUE)
+admission <- do.call(rbind, lapply(admission_file, function(x) read.csv(x, stringsAsFactors = FALSE)))
+
+daily_file <- list.files(path = "C:/Thaontp/Thao/APICS/Data-analysis",
+									 pattern = "Daily.*.csv",
+									 recursive = TRUE)
+
+daily <- do.call(rbind, lapply(daily_file, function(x) read.csv(x, stringsAsFactors = FALSE)))
+
+note_file <- list.files(path = "C:/Thaontp/Thao/APICS/Data-analysis",
+												pattern = "Notes.*.csv",
+												recursive = TRUE)
+note <- do.call(rbind, lapply(note_file, function(x) read.csv(x, stringsAsFactors = FALSE)))
+
+teadmission_file <- list.files(path = "C:/Thaontp/Thao/APICS/Data-analysis",
+															 pattern = ".*Admission.*.csv",
+															 recursive = TRUE)
+
+teadmission <- do.call(rbind, lapply(teadmission_file, function(x) read.csv(x, stringsAsFactors = FALSE)))
+
+tedischarge_files <- list.files(path = "C:/Thaontp/Thao/APICS/Data-analysis",
+																pattern = ".*Discharge.*.csv",
+																recursive = TRUE)
+
+tedischarge <- do.call(rbind, lapply(tedischarge_files, function(x) read.csv(x, stringsAsFactors = FALSE)))
+
+```
+
+```{r clean}
+
+teadmission <- teadmission %>% mutate_at(vars("date_of_admission", "date_of_admission_hospital"), ~as.Date(.))
+
+teadmission <- teadmission %>% filter(date_of_admission >= "2021-01-01")
+
+admission <- admission %>% mutate_at(vars("date_of_admission", "date_of_admission_hospital", "Discharge.date_of_discharge", "Discharge.date_of_hospital_discharge"), ~as.Date(.))
+
+admission <- admission %>% 
+	filter(patient_id %in% teadmission$patient_id) %>% 
+	select(patient_id, Admission.age, Admission.gender, Admission.fee_paying_method, Admission.comorbid_conditions, AdmissionAssessment.mechanically_ventilated, AdmissionAssessment.mechanically_ventilated_source, AdmissionAssessment.gcs_eye:AdmissionAssessment.gcs_motor, date_of_admission, date_of_admission_hospital, Discharge.date_of_discharge, Discharge.date_of_hospital_discharge, Discharge.discharge_status, AdmissionAssessment.antibiotics_pre_icu_admission, AdmissionAssessment.name_of_the_antibiotic:AdmissionAssessment.name_of_the_antibiotic_other, AdmissionAssessment.mechanically_ventilated, Discharge.cost_icu, Discharge.hospital_cost, Discharge.hospital_discharge_status)
+
+upgrade <- tedischarge %>% select(patient_id, TetanusPreDischarge.mechanically_ventilated)
+
+admission <- left_join(admission, upgrade, by = "patient_id")
+
+admission <- admission %>% mutate_at(vars("AdmissionAssessment.name_of_the_antibiotic", "AdmissionAssessment.name_of_the_antibiotic2", "AdmissionAssessment.name_of_the_antibiotic3", "AdmissionAssessment.name_of_the_antibiotic4", "AdmissionAssessment.name_of_the_antibiotic5", "AdmissionAssessment.name_of_the_antibiotic_other"), ~ na_if(.,""))
+
+admission <- admission %>% 
+	mutate(Admission.comorbid_conditions = ifelse(Admission.comorbid_conditions == "None", "No", "Yes"),
+				 icustay = as.numeric(Discharge.date_of_discharge - date_of_admission),
+				 hosstay = as.numeric(Discharge.date_of_hospital_discharge - date_of_admission_hospital),
+				 upgrade = ifelse(AdmissionAssessment.mechanically_ventilated == "self_vent" & TetanusPreDischarge.mechanically_ventilated == "mechanical_vent", "Yes", "No"))
+
+admission <- admission %>% mutate(antibiotics = rowSums(!is.na(select(., AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other))))
+
+##GCS
+
+admission <- admission %>% 
+	mutate(eye = case_when(AdmissionAssessment.gcs_eye == "Eye opening spontaneously" ~ 4,
+												 AdmissionAssessment.gcs_eye == "Eye opening to Speech" ~ 3,
+												 AdmissionAssessment.gcs_eye == "Eye opening in response to pain" ~ 2,
+												 TRUE ~ 1),
+				 verbal = case_when(AdmissionAssessment.gcs_verbal == "Oriented" ~ 5,
+				 									 AdmissionAssessment.gcs_verbal == "Confused" ~ 4,
+				 									 AdmissionAssessment.gcs_verbal == "Inappropriate words" ~ 3,
+				 									 AdmissionAssessment.gcs_verbal == "Incomprehensible sounds" ~ 2,
+				 									 TRUE ~ 1),
+				 motor = case_when(AdmissionAssessment.gcs_motor == "Obeys Commands" ~ 6,
+				 									AdmissionAssessment.gcs_motor == "Locailzes to pain" ~ 5,
+				 									AdmissionAssessment.gcs_motor == "Withdraws from pain" ~ 4,
+				 									AdmissionAssessment.gcs_motor == "Flexion in response to pain" ~ 3,
+				 									AdmissionAssessment.gcs_motor == "Extension to pain" ~ 2,
+				 									TRUE ~ 1))
+
+admission <- admission %>% mutate(gcs = eye + verbal + motor)
+
+
+
+tetanus <- teadmission %>% select(patient_id, TetanusAdmission.ablett_score, TetanusAdmission.asa_score, TetanusAdmission.occupation, TetanusAdmission.address, TetanusAdmission.source_of_admission, TetanusAdmission.wound, TetanusAdmission.incubation_period, TetanusAdmission.time_period_from_1st_symptom_to_hospital_admis, TetanusAdmission.period_of_onset)
+
+tetanus <- tetanus %>% mutate(Place = ifelse(str_detect(TetanusAdmission.address, regex("HCM|HCMC|Chi Minh|TPHCM", ignore_case = TRUE)) == TRUE, "HCM City", "Country side"),
+															Occupation = ifelse(!TetanusAdmission.occupation %in% c("Farmer", "Worker", "Elderly"), "Other", TetanusAdmission.occupation),
+															Ablett = case_when(TetanusAdmission.ablett_score %in% c("No spasm", "Spasm not interfering with respiration") ~ "Cluster 1",
+																								 TRUE ~ "Cluster 2"),
+															ASA = case_when(TetanusAdmission.asa_score == "Fit and well" ~ 1,
+																							TetanusAdmission.asa_score == "Minor ilness or injury" ~ 2,
+																							TetanusAdmission.asa_score == "Moderately severe disease" ~ 3,
+																							TetanusAdmission.asa_score == "Severe illness not immediately life-threatening" ~ 4,
+																							TRUE ~ 5),
+															Timeonset = extract_numeric(TetanusAdmission.period_of_onset))
+
+admission <- left_join(admission, tetanus, by = "patient_id")
+
+admission <- admission %>% mutate(Insurance = ifelse(Admission.fee_paying_method == "Self/out of pocket", "No", "Yes"))
+
+admission %>% select(-c(patient_id, AdmissionAssessment.gcs_eye:Discharge.date_of_hospital_discharge, eye:motor, TetanusAdmission.ablett_score:TetanusAdmission.address, AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other, TetanusPreDischarge.mechanically_ventilated, TetanusAdmission.period_of_onset)) %>% tbl_summary(by = Ablett, statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)"
+    ), label = c(Admission.age ~ "Age", Admission.gender ~ "Gender", TetanusAdmission.time_period_from_1st_symptom_to_hospital_admis ~ "First symptom to admission")) %>% add_p()
+```
+
