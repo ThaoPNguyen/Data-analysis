@@ -16,6 +16,7 @@ library(dplyr)
 library(gtsummary)
 library(ggplot2)
 library(table1)
+library(data.table)
 ```
 
 ```{r files loading}
@@ -176,20 +177,290 @@ daily_dt <- daily_dt %>%
 	mutate_at(vars(starts_with("DailyAssessment.culture_date")), ~as.Date(.)) %>% 
 	select(-c(DailyAssessment.mechanically_ventilated))
 
-library(data.table)
 
-culture_long <- as.data.table(daily_dt)  %>% 
-    melt(measure = patterns("^DailyAssessment.infection","^DailyAssessment.source", 
+culture_long <- as.data.table(daily_dt) %>% 
+	melt(measure = patterns("^DailyAssessment.infection","^DailyAssessment.source", 
                             "^DailyAssessment.hos_acquired",
                             "^DailyAssessment.culture_report", "^DailyAssessment.culture_date","^DailyAssessment.type_of_culture", "^DailyAssessment.organism"),
          value.name = c("DailyAssessment.infection","DailyAssessment.source", 
                         "DailyAssessment.hos_acquired",
-                        "DailyAssessment.culture_report", "DailyAssessment.culture_date", "DailyAssessment.type_of_culture", "DailyAssessment.organism")) 
+                        "DailyAssessment.culture_report", "DailyAssessment.culture_date", "DailyAssessment.type_of_culture", "DailyAssessment.organism"))
+
+
+culture_long <- culture_long %>% arrange(patient_id, DailyAssessment.date_of_daily_assessment) %>% group_by(patient_id)
+	
+insitu <- culture_long %>% 
+	select(patient_id, patient_id:DailyAssessment.urinary_catheterization, DailyAssessment.infection:DailyAssessment.hos_acquired) %>% 
+	unique()
+
+insitu[insitu == ""] <- NA
+
+insitu <- unique(insitu)
+
+insitu <- insitu %>% 
+	mutate(clinical = ifelse((!is.na(DailyAssessment.infection) & DailyAssessment.source == "Urinary System Infection"), "Yes", "No"))
+
+insitu <- insitu %>% 
+	select(patient_id, DailyAssessment.date_of_daily_assessment, DailyAssessment.urinary_catheterization, clinical) %>% 
+	unique()
+
+insitu <- insitu %>% 
+	mutate(DailyAssessment.urinary_catheterization = ifelse(DailyAssessment.urinary_catheterization == "No", 0L, 1L),
+				 clinical = ifelse(clinical == "No", 0L, 1L)) %>% 
+	arrange(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
+	group_by(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
+	filter(DailyAssessment.urinary_catheterization == max(DailyAssessment.urinary_catheterization),
+				 clinical == max(clinical)) %>% 
+	ungroup()
+
+insitu <- insitu %>%
+	group_by(patient_id) %>% 
+	mutate(CAUTIclinical = ifelse(clinical == 1L & ((DailyAssessment.urinary_catheterization == 1L & lag(DailyAssessment.urinary_catheterization) == 1L & lag(lag(DailyAssessment.urinary_catheterization)) == 1L) | (DailyAssessment.urinary_catheterization == 0L & lag(lag(DailyAssessment.urinary_catheterization == 1L)))), "Yes", "No"))
+
+##Clinical CAUTI
+
+clinicalCAUTI <- insitu %>% 
+	select(patient_id, CAUTIclinical) %>% 
+	filter(CAUTIclinical == "Yes") %>% 
+	filter(!duplicated(patient_id))
+
+daily_date <- insitu %>% 
+	select(patient_id, DailyAssessment.date_of_daily_assessment, DailyAssessment.urinary_catheterization)
+
+daily_date$DailyAssessment.date_of_daily_assessment <- as.Date(daily_date$DailyAssessment.date_of_daily_assessment)
+
+
+culture_date <- culture_long %>% 
+	select(patient_id, DailyAssessment.culture_report:DailyAssessment.organism)
+
+daily_date <- left_join(daily_date, culture_date, by = c("patient_id", "DailyAssessment.date_of_daily_assessment" = "DailyAssessment.culture_date"))
+
+daily_date <- daily_date %>% 
+	mutate(CAUTI_CDC = ifelse(DailyAssessment.urinary_catheterization == 1L & DailyAssessment.culture_report == "Growth" & DailyAssessment.type_of_culture == "Urine", "Yes", "No"))
+
+library(writexl)
+
+cdcCAUTI <- daily_date %>% 
+	select(patient_id, CAUTI_CDC) %>% 
+	filter(CAUTI_CDC == "Yes") %>% 
+	filter(!duplicated(patient_id))
+
+#write_xlsx(clinicalCAUTI, "Clinical CAUTI.xlsx")
+#write_xlsx(cdcCAUTI, "CDC CAUTI.xlsx")
+## CAUTI-CDC
+
+catheter <- daily %>% 
+	filter(patient_id %in% teadmission$patient_id) %>% 
+	select(patient_id, DailyAssessment.date_of_daily_assessment, DailyAssessment.urinary_catheterization) %>% 
+	arrange(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
+	group_by(patient_id) %>% 
+	mutate(DailyAssessment.urinary_catheterization = ifelse(DailyAssessment.urinary_catheterization %in% c("New", "Insitu"), 1L, 0L)) %>% 
+	filter(DailyAssessment.urinary_catheterization == 1L) %>% 
+	unique()
+
+patient_cath <- catheter[!duplicated(catheter$patient_id),]
+
+patient_cath <- patient_cath %>% 
+	select(patient_id, DailyAssessment.urinary_catheterization)
+
+cathdays <- catheter %>% 
+	summarise(n = n())
+
+admission <- admission %>% 
+	left_join(clinicalCAUTI, by = "patient_id") %>% 
+	left_join(cdcCAUTI, by = "patient_id")
+
+admission <- admission %>% 
+	left_join(patient_cath, by = "patient_id")
+
+admission <- admission %>% 
+	mutate(CAUTIclinical = ifelse(is.na(CAUTIclinical), "No", "Yes"), 
+				 CAUTI_CDC = ifelse(is.na(CAUTI_CDC), "No", "Yes"),
+				 DailyAssessment.urinary_catheterization = ifelse(is.na(DailyAssessment.urinary_catheterization), "No", "Yes"))
+
 
 ##Table
-admission %>% select(-c(patient_id, AdmissionAssessment.gcs_eye:Discharge.date_of_hospital_discharge, eye:motor, TetanusAdmission.ablett_score:TetanusAdmission.address, AdmissionAssessment.name_of_the_antibiotic: AdmissionAssessment.name_of_the_antibiotic_other, AdmissionAssessment.mechanically_ventilated_source, TetanusPreDischarge.mechanically_ventilated, TetanusAdmission.period_of_onset)) %>% tbl_summary(by = Ablett, statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)"
+admission %>% select(-c(patient_id, TetanusAdmission.ablett_score:TetanusAdmission.address, TetanusAdmission.period_of_onset)) %>% tbl_summary(by = Ablett, statistic = list(all_continuous() ~ "{median} ({p25}, {p75})", all_categorical() ~ "{n} / {N} ({p}%)"
     ), label = c(Admission.age ~ "Age", Admission.gender ~ "Gender", TetanusAdmission.time_period_from_1st_symptom_to_hospital_admis ~ "First symptom to admission")) %>% add_p()
 
+
+subdata <- admission %>% 
+	select(Ablett, CAUTIclinical, CAUTI_CDC, DailyAssessment.urinary_catheterization) %>% 
+	filter(DailyAssessment.urinary_catheterization == "Yes")
+
+tbl_summary(subdata, by = Ablett, statistic = list(all_continuous() ~ "{median} ({p25}, {p75})", all_categorical() ~ "{n} / {N} ({p}%)")) %>% add_p()
+
+subdata_count <- admission %>% 
+	select(patient_id, Ablett, DailyAssessment.urinary_catheterization, CAUTI_CDC) %>% 
+	filter(DailyAssessment.urinary_catheterization == "Yes")
+
+subdata_count <- subdata_count %>% 
+	left_join(cathdays, by = "patient_id")
+
+##Customize for tbl_summary
+
+#my_stats <- function(data, ...) {
+#  cluster1_sum <- sum(data$n[data$Ablett == "Cluster 1"], na.rm = TRUE)
+#  cluster2_sum <- sum(data$n[data$Ablett == "Cluster 2"], na.rm = TRUE)
+#  dplyr::tibble(
+#    cluster1_sum = cluster1_sum,
+#    cluster2_sum = cluster2_sum
+#  )
+#}
+
+library(data.table)
+
+tb <- subdata_count %>% 
+	group_by(Ablett, CAUTI_CDC) %>% 
+	summarise(cauti = sum(n)) %>% 
+	ungroup() %>% 
+	pivot_wider(names_from = CAUTI_CDC,
+							values_from = cauti)
+
+tb <- tb %>% mutate(sum = rowSums(select(., c("No", "Yes"))))
+
+tb1 <- table(subdata_count$Ablett, subdata_count$CAUTI_CDC) %>% 
+	as.data.frame() %>% 
+	filter(Var2 == "Yes")
+
+tb <- left_join(tb, tb1, by = c("Ablett" = "Var1"))
+
+tb <- tb %>% mutate(divide = (Freq/sum)*1000)
+
+tb %>% select(Ablett, divide) %>% tbl_summary(by = "Ablett", type = list(divide ~ 'continuous'), statistic = list(all_continuous() ~ "{mean}")) %>% add_p()
+##Re-make
+
+vent <- admission %>% 
+	select(patient_id, Ablett, Timeonset, Ventday)
+
+vent <- vent %>% mutate(Timeonset = case_when(Timeonset %in% c(24, 48) ~ "24-48h",
+																							Timeonset %in% c(72, 96) ~ "72-96h",
+																							Timeonset %in% c(120) ~ ">96h",
+																							TRUE ~ "Missing"))
+
+vent %>% select(Ablett, Timeonset) %>% tbl_summary(by = "Ablett") %>% add_p()
+
+mecha <- vent %>% filter(Ventday != 0) %>% select(Ablett, Ventday) %>% tbl_summary(by = "Ablett") %>% add_p()
+
+
+##Time of retaining urine catheter
+
+retain <- daily_dt %>% 
+	select(patient_id:DailyAssessment.urinary_catheterization) %>% 
+	filter(DailyAssessment.urinary_catheterization != "No") %>% 
+	arrange(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
+	group_by(patient_id) %>% 
+	mutate(DailyAssessment.urinary_catheterization = ifelse(DailyAssessment.urinary_catheterization == "No", NA, "Yes")) %>% 
+	unique() %>% 
+	ungroup()
+
+
+retain1 <- transform(retain, Counter = ave(DailyAssessment.urinary_catheterization, rleid(patient_id, DailyAssessment.urinary_catheterization), FUN = seq_along))
+
+retain1$DailyAssessment.date_of_daily_assessment <- as.Date(retain1$DailyAssessment.date_of_daily_assessment)
+
+retain1 <- retain1 %>% group_by(patient_id) %>% mutate(countday = cumsum(c(1, diff(DailyAssessment.date_of_daily_assessment) > 1)))
+
+retain1 <- retain1 %>% select(patient_id, Counter, countday) %>% group_by(patient_id, countday) %>% mutate(length = max(Counter)) %>% select(-Counter) %>% unique() 
+
+ablett <- admission %>% 
+	select(patient_id, Ablett) %>% 
+	left_join(retain1, by = "patient_id") %>% 
+	filter(!is.na(countday)) %>% 
+	mutate(length = as.numeric(length),
+				 length = case_when(length <= 5 ~ "1-5 Days",
+				 									 length >5 & length < 10 ~ "6-10 Days",
+				 									 TRUE ~ "> 10 Days"))
+
+ablett %>% select(Ablett, length) %>% tbl_summary(by = "Ablett") %>% add_p()
+
+ablett_group <- ablett %>% left_join(cdcCAUTI, by = "patient_id") %>% mutate(CAUTI_CDC = ifelse(is.na(CAUTI_CDC), "No", CAUTI_CDC))
+
+ablett_group %>% tbl_summary(include = c(length, CAUTI_CDC), by = "length") %>% add_p()
+
+##Group cạth flow chart
+
+group <- admission %>% select(patient_id, Urinecath, CAUTI_CDC)
+
+##Antibiotics
+
+frequen_anti <- daily %>% 
+	filter(patient_id %in% teadmission$patient_id) %>% 
+	select(patient_id,DailyAssessment.date_of_daily_assessment, starts_with(c("DailyAssessment.name_of_the_antibiotic")))
+
+frequen_anti <- as.data.table(frequen_anti) %>% melt(measure = patterns("^DailyAssessment.name_of_the_antibiotic"),
+																										 value.name = "Antibiotics") %>% 
+	select(-variable) %>% 
+	filter(!Antibiotics %in% c("", "Metronidazole(Flagyl)")) %>% 
+	unique()
+
+frequen_anti <- frequen_anti %>% filter(!is.na(Antibiotics))
+
+frequen_anti <- frequen_anti %>% 
+	arrange(patient_id, DailyAssessment.date_of_daily_assessment)
+
+frequen_anti <- left_join(frequen_anti, insitu, by = c("patient_id", "DailyAssessment.date_of_daily_assessment"))
+
+frequen_anti <- frequen_anti %>% 
+	group_by(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
+	mutate(listanti = list(Antibiotics)) %>% 
+	select(-c(DailyAssessment.urinary_catheterization, clinical)) %>% 
+	unique() %>% 
+	ungroup()
+
+frequen_anti$DailyAssessment.date_of_daily_assessment <- as.Date(frequen_anti$DailyAssessment.date_of_daily_assessment)
+
+frequen_anti <- frequen_anti %>% 
+	group_by(patient_id) %>% 
+	mutate(countday = cumsum(c(1, diff(DailyAssessment.date_of_daily_assessment) > 1)))
+
+##
+
+anti <- left_join(clinicalCAUTI, frequen_anti, by = c("patient_id"))
+
+library(janitor)
+
+anti_use <- tabyl(anti$Antibiotics, sort = TRUE) %>% 
+	arrange(desc(n)) %>% 
+	mutate(percent = round(percent*100, 2))
+
+colnames(anti_use) = c("Antibiotics names", "Frequency", "Percentage")
+
+library(kableExtra)
+
+kbl(anti_use, format = "html", table.attr = "style='width:50%;'") %>% kable_styling(bootstrap_options = c("striped"))
+##Sites separated
+
+sitepatient <- select(admission, patient_id, Site)
+
+site_anti_use <- inner_join(frequen_anti, sitepatient, by = "patient_id")
+
+site_anti <- ungroup(site_anti_use) %>% 
+	select(DailyAssessment.name_of_the_antibiotic, Site) %>% 
+	filter(DailyAssessment.name_of_the_antibiotic %in% anti_use$`Antibiotics names`) %>% tbl_summary(by = Site, sort = all_categorical() ~ "frequency", label = DailyAssessment.name_of_the_antibiotic ~ "Antibiotics name") %>% 
+	as_gt() %>% 
+	opt_table_font(font = list("Serif"))%>%
+  tab_options(table.font.size = px(11L))
+
+site_anti
+##graph
+
+cbPalette <- c("#66347F", "#C92C6D", "#D27685", "#BFACE2", "#3E54AC", "#E7B10A", "#0E8388")
+
+antibiotic_site <- select(site_anti_use, patient_id, DailyAssessment.name_of_the_antibiotic, Site) %>% 
+	filter(DailyAssessment.name_of_the_antibiotic %in% anti_use$`Antibiotics names`) %>% group_by(patient_id, DailyAssessment.name_of_the_antibiotic)
+
+graphanti <- ggplot(antibiotic_site, aes(y = forcats::fct_rev(forcats::fct_infreq(DailyAssessment.name_of_the_antibiotic)), fill = Site)) +
+  geom_bar() + 
+	theme_classic() + 
+	labs(title = "Common antibiotics used in ICUs", x = "", y = "") + scale_fill_manual(values=cbPalette) + 
+	theme(
+    axis.text.y = element_text(size = 5, face = "bold"),
+    axis.text.x = element_text(size = 7, face = "bold"),
+    plot.title = element_text(hjust = 0.1, face = "bold", size = 7),
+    legend.title= element_blank(),
+    legend.text = element_text(size = 7, face = "bold"),
+    legend.key.size = unit(0.6, 'cm'))
 
 ```
 
