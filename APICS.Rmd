@@ -17,6 +17,7 @@ library(gtsummary)
 library(ggplot2)
 library(table1)
 library(data.table)
+library(writexl)
 ```
 
 ```{r files loading}
@@ -129,6 +130,7 @@ tetanus <- tetanus %>% mutate(Place = ifelse(str_detect(TetanusAdmission.address
 admission <- left_join(admission, tetanus, by = "patient_id")
 
 
+
 ##Predischarge
 
 predischarge <- tedischarge %>% 
@@ -144,8 +146,6 @@ predischarge <- predischarge %>%
 	mutate(ANSD = if_else(ANSD == 1, "Yes", "No", "No"),
 				 Sepsis = if_else(Sepsis == 1, "Yes", "No", "No"))
 
-admission <- admission %>% 
-	left_join(predischarge, by = "patient_id")
 
 ##Daily
 
@@ -159,8 +159,8 @@ daily_dt <- daily %>%
 days_of_inter <- daily_dt %>% 
 	arrange(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
 	group_by(patient_id) %>% 
-	mutate(Ventday = sum(DailyAssessment.mechanically_ventilated == "mechanical_vent"),
-				 Urinecath = sum(DailyAssessment.urinary_catheterization %in% c("Insitu", "New")),
+	mutate(Ventday = sum(DailyAssessment.mechanically_ventilated %in% c("mechanical_vent")),
+		Urinecath = sum(DailyAssessment.urinary_catheterization %in% c("Insitu", "New")),
 				 Firsturine = ifelse(DailyAssessment.urinary_catheterization %in% c("Insitu", "New"), DailyAssessment.date_of_daily_assessment, NA),
 				 Firsturine = as.Date(Firsturine[which.min(is.na(Firsturine))]),
 				 Time_to_first_urine = as.numeric(Firsturine - date_of_admission)) %>% 
@@ -168,7 +168,18 @@ days_of_inter <- daily_dt %>%
 	select(patient_id, Ventday, Urinecath, Time_to_first_urine) %>% 
 	unique()
 
-admission <- admission %>% 
+##Group deteriorate
+
+admission_1 <- admission %>% mutate(upgrade = case_when(
+	upgrade == "Yes" & Ablett == "Cluster 1" ~ "Deteriorate",
+	upgrade == "Yes" & Ablett == "Cluster 2" ~ "Servere",
+	upgrade == "No" & Ablett == "Cluster 1" ~ "Mild",
+	upgrade == "No" & Ablett == "Cluster 2" ~ "Servere"))
+
+admission_1 <- admission_1 %>% 
+	left_join(predischarge, by = "patient_id")
+
+admission_1 <- admission_1 %>% 
 	left_join(days_of_inter, by = "patient_id")
 
 ##CAUTI
@@ -266,14 +277,14 @@ patient_cath <- patient_cath %>%
 cathdays <- catheter %>% 
 	summarise(n = n())
 
-admission <- admission %>% 
+admission_1 <- admission_1 %>% 
 	left_join(clinicalCAUTI, by = "patient_id") %>% 
 	left_join(cdcCAUTI, by = "patient_id")
 
-admission <- admission %>% 
+admission_1 <- admission_1 %>% 
 	left_join(patient_cath, by = "patient_id")
 
-admission <- admission %>% 
+admission_1 <- admission_1 %>% 
 	mutate(CAUTIclinical = ifelse(is.na(CAUTIclinical), "No", "Yes"), 
 				 CAUTI_CDC = ifelse(is.na(CAUTI_CDC), "No", "Yes"),
 				 DailyAssessment.urinary_catheterization = ifelse(is.na(DailyAssessment.urinary_catheterization), "No", "Yes"))
@@ -284,18 +295,20 @@ admission %>% select(-c(patient_id, TetanusAdmission.ablett_score:TetanusAdmissi
     ), label = c(Admission.age ~ "Age", Admission.gender ~ "Gender", TetanusAdmission.time_period_from_1st_symptom_to_hospital_admis ~ "First symptom to admission")) %>% add_p()
 
 
-subdata <- admission %>% 
-	select(Ablett, CAUTIclinical, CAUTI_CDC, DailyAssessment.urinary_catheterization) %>% 
+subdata <- admission_1 %>% 
+	select(upgrade, CAUTIclinical, CAUTI_CDC, DailyAssessment.urinary_catheterization) %>% 
 	filter(DailyAssessment.urinary_catheterization == "Yes")
 
-tbl_summary(subdata, by = Ablett, statistic = list(all_continuous() ~ "{median} ({p25}, {p75})", all_categorical() ~ "{n} / {N} ({p}%)")) %>% add_p()
+tbl_summary(subdata, by = upgrade, statistic = list(all_continuous() ~ "{median} ({p25}, {p75})", all_categorical() ~ "{n} / {N} ({p}%)")) %>% add_p()
 
-subdata_count <- admission %>% 
-	select(patient_id, Ablett, DailyAssessment.urinary_catheterization, CAUTI_CDC) %>% 
+subdata_count <- admission_1 %>% 
+	select(patient_id, upgrade, DailyAssessment.urinary_catheterization, CAUTI_CDC) %>% 
 	filter(DailyAssessment.urinary_catheterization == "Yes")
 
 subdata_count <- subdata_count %>% 
 	left_join(cathdays, by = "patient_id")
+
+subdata_count %>% select(upgrade, n) %>% tbl_summary(by = "upgrade", label = c(n ~ "Length of catheter")) %>% add_p()
 
 ##Customize for tbl_summary
 
@@ -311,7 +324,7 @@ subdata_count <- subdata_count %>%
 library(data.table)
 
 tb <- subdata_count %>% 
-	group_by(Ablett, CAUTI_CDC) %>% 
+	group_by(upgrade, CAUTI_CDC) %>% 
 	summarise(cauti = sum(n)) %>% 
 	ungroup() %>% 
 	pivot_wider(names_from = CAUTI_CDC,
@@ -319,30 +332,32 @@ tb <- subdata_count %>%
 
 tb <- tb %>% mutate(sum = rowSums(select(., c("No", "Yes"))))
 
-tb1 <- table(subdata_count$Ablett, subdata_count$CAUTI_CDC) %>% 
+tb1 <- table(subdata_count$upgrade, subdata_count$CAUTI_CDC) %>% 
 	as.data.frame() %>% 
 	filter(Var2 == "Yes")
 
-tb <- left_join(tb, tb1, by = c("Ablett" = "Var1"))
+tb <- left_join(tb, tb1, by = c("upgrade" = "Var1"))
 
 tb <- tb %>% mutate(divide = (Freq/sum)*1000)
 
-tb %>% select(Ablett, divide) %>% tbl_summary(by = "Ablett", type = list(divide ~ 'continuous'), statistic = list(all_continuous() ~ "{mean}")) %>% add_p()
+tb %>% select(upgrade, divide) %>% tbl_summary(by = "upgrade", type = list(divide ~ 'continuous'), statistic = list(all_continuous() ~ "{mean}")) %>% add_p()
 ##Re-make
 
-vent <- admission %>% 
-	select(patient_id, Ablett, Timeonset, Ventday)
+vent <- admission_1 %>% 
+	select(patient_id, upgrade, Timeonset, Ventday)
 
 vent <- vent %>% mutate(Timeonset = case_when(Timeonset %in% c(24, 48) ~ "24-48h",
 																							Timeonset %in% c(72, 96) ~ "72-96h",
 																							Timeonset %in% c(120) ~ ">96h",
 																							TRUE ~ "Missing"))
 
-vent %>% select(Ablett, Timeonset) %>% tbl_summary(by = "Ablett") %>% add_p()
+vent %>% select(upgrade, Timeonset) %>% tbl_summary(by = "upgrade") %>% add_p()
 
-mecha <- vent %>% filter(Ventday != 0) %>% select(Ablett, Ventday) %>% tbl_summary(by = "Ablett") %>% add_p()
+mecha <- vent %>% filter(Ventday != 0) %>% select(upgrade, Ventday) %>% tbl_summary(by = "upgrade") %>% add_p()
 
+```
 
+```{r}
 ##Time of retaining urine catheter
 
 retain <- daily_dt %>% 
@@ -363,26 +378,39 @@ retain1 <- retain1 %>% group_by(patient_id) %>% mutate(countday = cumsum(c(1, di
 
 retain1 <- retain1 %>% select(patient_id, Counter, countday) %>% group_by(patient_id, countday) %>% mutate(length = max(Counter)) %>% select(-Counter) %>% unique() 
 
-ablett <- admission %>% 
-	select(patient_id, Ablett) %>% 
-	left_join(retain1, by = "patient_id") %>% 
-	filter(!is.na(countday)) %>% 
-	mutate(length = as.numeric(length),
-				 length = case_when(length <= 5 ~ "1-5 Days",
-				 									 length >5 & length < 10 ~ "6-10 Days",
+```
+
+```{r}
+ablett <- subdata_count %>%
+	mutate(length = case_when(n <= 5 ~ "1-5 Days",
+				 									 n > 5 & n < 10 ~ "6-10 Days",
 				 									 TRUE ~ "> 10 Days"))
 
-ablett %>% select(Ablett, length) %>% tbl_summary(by = "Ablett") %>% add_p()
+subset <- admission_1 %>% 
+	select(patient_id, Time_to_first_urine, CAUTIclinical)
 
-ablett_group <- ablett %>% left_join(cdcCAUTI, by = "patient_id") %>% mutate(CAUTI_CDC = ifelse(is.na(CAUTI_CDC), "No", CAUTI_CDC))
+ablett <- ablett %>% left_join(subset, by="patient_id")
 
-ablett_group %>% tbl_summary(include = c(length, CAUTI_CDC), by = "length") %>% add_p()
 
-##Group cạth flow chart
+ablett %>% select(-c(patient_id, DailyAssessment.urinary_catheterization)) %>%  tbl_summary(by = "upgrade", label = c(n ~ "Length of catheter", length ~ "Group of catheter length")) %>% add_p()
 
-group <- admission %>% select(patient_id, Urinecath, CAUTI_CDC)
+admission_1 <- admission_1 %>% mutate(Discharge.cost_icu = as.numeric(round(Discharge.cost_icu/23493, 2)))
 
-##Antibiotics
+admission_1 %>% select(Ventday, ANSD, Sepsis, Discharge.cost_icu:upgrade) %>% tbl_summary(by = "upgrade") %>% add_p()
+```
+
+```{r}
+group <- admission_1 %>% select(patient_id, Urinecath, CAUTI_CDC)
+
+group_new <- admission_1 %>% select(patient_id, upgrade)
+
+cath_new <- left_join(group_new, subdata_count, by = c("patient_id", "upgrade")) %>% 
+	mutate(DailyAssessment.urinary_catheterization = replace_na(DailyAssessment.urinary_catheterization, "No"))
+
+cath_new %>% select(upgrade, DailyAssessment.urinary_catheterization) %>% tbl_summary(by = upgrade) %>% add_p()
+```
+
+```{r, eval=FALSE}
 
 frequen_anti <- daily %>% 
 	filter(patient_id %in% teadmission$patient_id) %>% 
@@ -403,35 +431,52 @@ frequen_anti <- left_join(frequen_anti, insitu, by = c("patient_id", "DailyAsses
 
 frequen_anti <- frequen_anti %>% 
 	group_by(patient_id, DailyAssessment.date_of_daily_assessment) %>% 
-	mutate(listanti = list(Antibiotics)) %>% 
-	select(-c(DailyAssessment.urinary_catheterization, clinical)) %>% 
-	unique() %>% 
-	ungroup()
+	ungroup() %>% 
+	select(-c(DailyAssessment.urinary_catheterization, DailyAssessment.date_of_daily_assessment, clinical)) %>% 
+	unique() 
 
-frequen_anti$DailyAssessment.date_of_daily_assessment <- as.Date(frequen_anti$DailyAssessment.date_of_daily_assessment)
-
+##Pick antibiotics when CAUTI occurs
 frequen_anti <- frequen_anti %>% 
-	group_by(patient_id) %>% 
-	mutate(countday = cumsum(c(1, diff(DailyAssessment.date_of_daily_assessment) > 1)))
+	filter(CAUTIclinical == "Yes")
+
 
 ##
 
-anti <- left_join(clinicalCAUTI, frequen_anti, by = c("patient_id"))
-
 library(janitor)
 
-anti_use <- tabyl(anti$Antibiotics, sort = TRUE) %>% 
+anti_use <- tabyl(frequen_anti$Antibiotics, sort = TRUE) %>% 
 	arrange(desc(n)) %>% 
 	mutate(percent = round(percent*100, 2))
 
 colnames(anti_use) = c("Antibiotics names", "Frequency", "Percentage")
 
-library(kableExtra)
 
-kbl(anti_use, format = "html", table.attr = "style='width:50%;'") %>% kable_styling(bootstrap_options = c("striped"))
+##Organism
+
+micro <- daily_date %>% 
+	select(patient_id, DailyAssessment.type_of_culture, DailyAssessment.organism) %>% 
+	left_join(cdcCAUTI, by = "patient_id") %>% 
+	filter(!is.na(CAUTI_CDC) & DailyAssessment.type_of_culture == "Urine" & DailyAssessment.organism != "") %>% 
+	unique()
+
+micro_culture <- tabyl(micro$DailyAssessment.organism, sort = TRUE) %>% 
+	arrange(desc(n)) %>% 
+	mutate(percent = round(percent*100, 2))
+
+colnames(micro_culture) = c("Organism names", "Frequency", "Percentage")
+
+library(writexl)
+
+#write_xlsx(anti_use, "Antibiotics use in Clinical CAUTI.xlsx")
+
+#write_xlsx(micro_culture, "Microbes culture in CDC CAUTI.xlsx")
+```
+
+```{r, eval=FALSE}
+
 ##Sites separated
 
-sitepatient <- select(admission, patient_id, Site)
+anti_group <- select(admission, patient_id, Ablett)
 
 site_anti_use <- inner_join(frequen_anti, sitepatient, by = "patient_id")
 
@@ -462,5 +507,6 @@ graphanti <- ggplot(antibiotic_site, aes(y = forcats::fct_rev(forcats::fct_infre
     legend.text = element_text(size = 7, face = "bold"),
     legend.key.size = unit(0.6, 'cm'))
 
+#write_xlsx(admission, "Admission.xlsx")
 ```
 
